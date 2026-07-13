@@ -22,40 +22,73 @@ jobs:
           test -f docs/agents/review-policy.md
 
   go:
-    if: ${{ hashFiles('go.mod') != '' }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
+      - name: Detect Go module
+        id: module
+        run: |
+          if test -f go.mod; then
+            echo "present=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "present=false" >> "$GITHUB_OUTPUT"
+          fi
       - uses: actions/setup-go@v6
+        if: steps.module.outputs.present == 'true'
         with:
           go-version-file: go.mod
           cache: true
-      - run: go test ./...
-      - run: go test -race ./...
-      - run: go vet ./...
+      - if: steps.module.outputs.present == 'true'
+        run: go test ./...
+      - if: steps.module.outputs.present == 'true'
+        run: go test -race ./...
+      - if: steps.module.outputs.present == 'true'
+        run: go vet ./...
 
   web:
-    if: ${{ hashFiles('web/package.json') != '' }}
     runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: web
     steps:
       - uses: actions/checkout@v7
+      - name: Detect web application
+        id: app
+        run: |
+          if test -f web/package.json; then
+            echo "present=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "present=false" >> "$GITHUB_OUTPUT"
+          fi
       - uses: actions/setup-node@v6
+        if: steps.app.outputs.present == 'true'
         with:
           node-version: 22
           cache: npm
           cache-dependency-path: web/package-lock.json
-      - run: npm ci
-      - run: npm run lint
-      - run: npm run test -- --run
-      - run: npm run build
+      - if: steps.app.outputs.present == 'true'
+        working-directory: web
+        run: npm ci
+      - if: steps.app.outputs.present == 'true'
+        working-directory: web
+        run: npm run lint
+      - if: steps.app.outputs.present == 'true'
+        working-directory: web
+        run: npm run test -- --run
+      - if: steps.app.outputs.present == 'true'
+        working-directory: web
+        run: npm run build
 
   terraform:
-    if: ${{ hashFiles('deploy/terraform/**/*.tf') != '' }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
+      - name: Detect Terraform configuration
+        id: config
+        run: |
+          if find deploy/terraform -name '*.tf' -print -quit 2>/dev/null | grep -q .; then
+            echo "present=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "present=false" >> "$GITHUB_OUTPUT"
+          fi
       - uses: hashicorp/setup-terraform@v4
-      - run: terraform fmt -check -recursive deploy/terraform
+        if: steps.config.outputs.present == 'true'
+      - if: steps.config.outputs.present == 'true'
+        run: terraform fmt -check -recursive deploy/terraform
