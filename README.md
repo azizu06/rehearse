@@ -42,7 +42,7 @@ The core runtime does **not** require RabbitMQ or PostgreSQL. An optional queued
 - **v1.0 — resume-ready product:** the full source/target adapter matrix, safety hardening, CI mode, AWS/Terraform proof, external onboarding, and release audit.
 - **Later:** Kubernetes runner, Windows, native RDS/Supabase/MongoDB adapters, and team tenancy.
 
-See [PRD.md](PRD.md), [CONTEXT.md](CONTEXT.md), and the [architecture decisions](docs/adr/) for the committed scope. Work is tracked in [GitHub Issues](https://github.com/azizu06/rehearse/issues).
+See [PRD.md](PRD.md), [CONTEXT.md](CONTEXT.md), and the [architecture decisions](docs/adr/) for the committed scope. Work is tracked in [GitHub Issues](https://github.com/azizu06/rehearse/issues) and the public [Rehearse delivery board](https://github.com/users/azizu06/projects/4).
 
 ## Engineering standards
 
@@ -51,4 +51,3 @@ Rehearse is developed issue-first with tracer-bullet TDD. Go code uses the stand
 ## License
 
 Apache License 2.0. See [LICENSE](LICENSE).
-

@@ -6,12 +6,12 @@ Rehearse has an approved product definition and engineering foundation. Product 
 
 ## First implementation task
 
-Start with GitHub Issue #1 only after confirming its live number/title on GitHub. Create an isolated worktree and branch named from that issue. Build the smallest end-to-end tracer bullet test first; do not split into disconnected backend/frontend scaffolds that cannot prove the product loop.
+Start with GitHub Issue [#5](https://github.com/azizu06/rehearse/issues/5), **Scaffold the tested Go + React tracer bullet**. GitHub numbers pull requests and issues in one sequence, so automated Dependabot pull requests consumed #1-#4 during setup. Create an isolated worktree and branch named from #5. Build the smallest end-to-end tracer bullet test first; do not split into disconnected backend/frontend scaffolds that cannot prove the product loop.
 
 ## Required opening sequence
 
 1. Read `AGENTS.md`, `CONTEXT.md`, `PRD.md`, and `docs/adr/`.
-2. Inspect `git status`, worktrees, open PRs, and the issue dependency board.
+2. Inspect `git status`, worktrees, open PRs, and the [issue dependency board](https://github.com/users/azizu06/projects/4).
 3. Claim one unblocked issue and create one isolated worktree.
 4. Apply TDD and the review routing in `docs/agents/review-policy.md`.
 5. Leave roadmap and resume claims unchanged unless acceptance evidence justifies an update.
@@ -29,4 +29,3 @@ Start with GitHub Issue #1 only after confirming its live number/title on GitHub
 ## Orchestration
 
 The user-facing root task is the coordinator. Implementation tasks are fresh Codex tasks in isolated worktrees. Use Terra medium/high for scoped implementation and tests. Use Sol high for architecture, security-sensitive, or cross-cutting review. Sol xhigh/max/ultra requires Aziz's explicit approval.
-
