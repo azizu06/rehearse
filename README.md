@@ -48,6 +48,27 @@ See [PRD.md](PRD.md), [CONTEXT.md](CONTEXT.md), and the [architecture decisions]
 
 Rehearse is developed issue-first with tracer-bullet TDD. Go code uses the standard `testing` package, race detection, fuzz tests where parsers cross trust boundaries, and Testcontainers for real service integration. The frontend uses Vitest, React Testing Library, and Playwright. Every pull request follows the review policy in [docs/agents/review-policy.md](docs/agents/review-policy.md).
 
+## Development
+
+The tracer-bullet toolchain requires the Go version declared in `go.mod` and Node.js 22.
+
+```bash
+npm --prefix web ci
+make test
+make test-race
+make lint
+make build
+```
+
+`make test` is the single command for the Go and frontend unit suites. To run the browser smoke path against a freshly built native binary:
+
+```bash
+npm --prefix web exec -- playwright install chromium
+make test-browser
+```
+
+The binary listens on `127.0.0.1:8484` by default. Start it with `./build/rehearse`, then open <http://127.0.0.1:8484>.
+
 ## License
 
 Apache License 2.0. See [LICENSE](LICENSE).

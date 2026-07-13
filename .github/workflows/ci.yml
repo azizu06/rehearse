@@ -21,60 +21,46 @@ jobs:
           test -f LICENSE
           test -f docs/agents/review-policy.md
 
-  go:
-    runs-on: ubuntu-latest
+  build-and-test:
+    name: Build and test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
     steps:
       - uses: actions/checkout@v7
-      - name: Detect Go module
-        id: module
-        run: |
-          if test -f go.mod; then
-            echo "present=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "present=false" >> "$GITHUB_OUTPUT"
-          fi
       - uses: actions/setup-go@v6
-        if: steps.module.outputs.present == 'true'
         with:
           go-version-file: go.mod
-          cache: true
-      - if: steps.module.outputs.present == 'true'
-        run: go test ./...
-      - if: steps.module.outputs.present == 'true'
-        run: go test -race ./...
-      - if: steps.module.outputs.present == 'true'
-        run: go vet ./...
-
-  web:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v7
-      - name: Detect web application
-        id: app
-        run: |
-          if test -f web/package.json; then
-            echo "present=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "present=false" >> "$GITHUB_OUTPUT"
-          fi
+          cache: false
       - uses: actions/setup-node@v6
-        if: steps.app.outputs.present == 'true'
         with:
           node-version: 22
           cache: npm
           cache-dependency-path: web/package-lock.json
-      - if: steps.app.outputs.present == 'true'
-        working-directory: web
-        run: npm ci
-      - if: steps.app.outputs.present == 'true'
-        working-directory: web
-        run: npm run lint
-      - if: steps.app.outputs.present == 'true'
-        working-directory: web
-        run: npm run test -- --run
-      - if: steps.app.outputs.present == 'true'
-        working-directory: web
-        run: npm run build
+      - run: npm --prefix web ci
+      - run: make test
+      - run: make test-race
+      - run: make lint
+      - run: make build
+
+  browser-smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: false
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - run: npm --prefix web ci
+      - run: npm --prefix web exec -- playwright install --with-deps chromium
+      - run: make test-browser
 
   terraform:
     runs-on: ubuntu-latest
