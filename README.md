@@ -57,8 +57,11 @@ npm --prefix web ci
 make test
 make test-race
 make lint
+make static
 make build
 ```
+
+`make security` adds `govulncheck` plus a pinned Trivy filesystem scan. It requires Trivy 0.72.0 on `PATH`, or `TRIVY=/path/to/trivy`; CI installs the same scanner version.
 
 `make test` is the single command for the Go and frontend unit suites. To run the browser smoke path against a freshly built native binary:
 

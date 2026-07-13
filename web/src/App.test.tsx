@@ -28,4 +28,14 @@ describe("App", () => {
     ).toBeVisible();
     expect(await screen.findByText("Connected to Rehearse test")).toBeVisible();
   });
+
+  it("shows a useful status when the local control plane cannot be reached", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockRejectedValue(new TypeError("failed to fetch")));
+
+    render(<App />);
+
+    expect(
+      await screen.findByText("Unable to reach the local control plane"),
+    ).toBeVisible();
+  });
 });

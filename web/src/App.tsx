@@ -42,40 +42,27 @@ export function App() {
   }, []);
 
   return (
-    <main>
-      <header className="masthead">
-        <a className="wordmark" href="/" aria-label="Rehearse home">
-          REHEARSE
-        </a>
-        <span className="phase">Foundation build</span>
+    <main className="shell">
+      <header>
+        <strong>Rehearse</strong>
       </header>
 
-      <section className="hero" aria-labelledby="hero-title">
-        <p className="eyebrow">Recovery evidence, before the incident</p>
+      <section aria-labelledby="hero-title">
         <h1 id="hero-title">Know your recovery works before the incident.</h1>
-        <p className="summary">
+        <p>
           Rehearse restores backups into disposable environments, verifies the
           application, records what happened, and cleans up.
         </p>
 
-        <div className={`connection connection--${connection.state}`} role="status">
+        <p className={`connection connection--${connection.state}`} role="status">
           <span className="connection__signal" aria-hidden="true" />
           {connection.state === "connecting" && "Connecting to the local control plane"}
           {connection.state === "connected" &&
             `Connected to Rehearse ${connection.version}`}
           {connection.state === "error" &&
             "Unable to reach the local control plane"}
-        </div>
+        </p>
       </section>
-
-      <ol className="recovery-path" aria-label="Recovery drill stages">
-        <li>Acquire backup</li>
-        <li>Restore state</li>
-        <li>Boot sandbox</li>
-        <li>Run probes</li>
-        <li>Record evidence</li>
-        <li>Clean up</li>
-      </ol>
     </main>
   );
 }

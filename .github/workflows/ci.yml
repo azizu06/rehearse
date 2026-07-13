@@ -46,7 +46,12 @@ jobs:
       - run: make build
 
   browser-smoke:
-    runs-on: ubuntu-latest
+    name: Browser smoke (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-go@v6
@@ -59,8 +64,33 @@ jobs:
           cache: npm
           cache-dependency-path: web/package-lock.json
       - run: npm --prefix web ci
-      - run: npm --prefix web exec -- playwright install --with-deps chromium
+      - if: runner.os == 'Linux'
+        run: npm --prefix web exec -- playwright install --with-deps chromium
+      - if: runner.os == 'macOS'
+        run: npm --prefix web exec -- playwright install chromium
       - run: make test-browser
+
+  static-security:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: false
+      - uses: golangci/golangci-lint-action@v9.3.0
+        with:
+          version: v2.12.2
+      - run: go run golang.org/x/vuln/cmd/govulncheck@v1.6.0 ./...
+      - uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          version: v0.72.0
+          scan-type: fs
+          scan-ref: .
+          scanners: vuln,secret
+          severity: HIGH,CRITICAL
+          exit-code: 1
+          skip-dirs: .git,build,web/node_modules
 
   terraform:
     runs-on: ubuntu-latest
