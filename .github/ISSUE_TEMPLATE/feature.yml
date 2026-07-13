@@ -1,0 +1,36 @@
+name: Feature
+description: Propose an acceptance-tested Rehearse capability
+title: "[Feature]: "
+labels: ["needs-triage", "type:feature"]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What user or operator problem exists today?
+    validations:
+      required: true
+  - type: textarea
+    id: outcome
+    attributes:
+      label: Outcome
+      description: Describe observable success without prescribing implementation.
+    validations:
+      required: true
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: Acceptance criteria
+      placeholder: "- [ ] Given/when/then..."
+    validations:
+      required: true
+  - type: textarea
+    id: dependencies
+    attributes:
+      label: Dependencies
+      placeholder: "Blocked by #N, or None"
+  - type: textarea
+    id: scope
+    attributes:
+      label: Out of scope
+

@@ -1,0 +1,34 @@
+name: Bug
+description: Report a reproducible defect without sensitive data
+title: "[Bug]: "
+labels: ["needs-triage", "type:bug"]
+body:
+  - type: markdown
+    attributes:
+      value: "Do not attach real credentials, backup contents, or production logs containing secrets."
+  - type: textarea
+    id: observed
+    attributes:
+      label: Observed behavior
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Reproduction
+    validations:
+      required: true
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: Rehearse version, OS, Docker runtime, and relevant adapter versions.
+    validations:
+      required: true
+
