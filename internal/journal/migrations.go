@@ -25,6 +25,15 @@ type migration struct {
 }
 
 func applyMigrations(ctx context.Context, database *sql.DB) error {
+	return applyMigrationsFromFS(ctx, database, migrationFiles, CurrentSchemaVersion)
+}
+
+func applyMigrationsFromFS(ctx context.Context, database *sql.DB, files fs.FS, currentVersion int) error {
+	migrations, err := migrationsFromFS(files, currentVersion)
+	if err != nil {
+		return err
+	}
+
 	if _, err := database.ExecContext(ctx, `
         CREATE TABLE IF NOT EXISTS schema_migrations (
             version INTEGER PRIMARY KEY,
@@ -35,10 +44,6 @@ func applyMigrations(ctx context.Context, database *sql.DB) error {
 		return fmt.Errorf("create migration ledger: %w", err)
 	}
 
-	migrations, err := embeddedMigrations()
-	if err != nil {
-		return err
-	}
 	for _, item := range migrations {
 		var applied int
 		err := database.QueryRowContext(ctx, "SELECT COUNT(*) FROM schema_migrations WHERE version = ?", item.version).Scan(&applied)
@@ -73,13 +78,11 @@ func applyMigrations(ctx context.Context, database *sql.DB) error {
 	}
 	return nil
 }
-
-func embeddedMigrations() ([]migration, error) {
-	names, err := fs.Glob(migrationFiles, "migrations/*.sql")
+func migrationsFromFS(files fs.FS, currentVersion int) ([]migration, error) {
+	names, err := fs.Glob(files, "migrations/*.sql")
 	if err != nil {
 		return nil, fmt.Errorf("list embedded migrations: %w", err)
 	}
-	sort.Strings(names)
 	result := make([]migration, 0, len(names))
 	for _, name := range names {
 		base := strings.TrimSuffix(strings.TrimPrefix(name, "migrations/"), ".sql")
@@ -91,14 +94,32 @@ func embeddedMigrations() ([]migration, error) {
 		if err != nil {
 			return nil, fmt.Errorf("parse migration filename %q: %w", name, err)
 		}
-		contents, err := migrationFiles.ReadFile(name)
+		contents, err := fs.ReadFile(files, name)
 		if err != nil {
 			return nil, fmt.Errorf("read migration %q: %w", name, err)
 		}
 		result = append(result, migration{version: version, name: parts[1], sql: string(contents)})
 	}
-	if len(result) == 0 || result[len(result)-1].version != CurrentSchemaVersion {
-		return nil, fmt.Errorf("embedded migrations do not end at schema version %d", CurrentSchemaVersion)
+	sort.Slice(result, func(left, right int) bool {
+		if result[left].version != result[right].version {
+			return result[left].version < result[right].version
+		}
+		return result[left].name < result[right].name
+	})
+	previousVersion := 0
+	for _, item := range result {
+		if item.version <= previousVersion {
+			return nil, fmt.Errorf(
+				"migration version %d (%q) must be greater than %d",
+				item.version,
+				item.name,
+				previousVersion,
+			)
+		}
+		previousVersion = item.version
+	}
+	if len(result) == 0 || result[len(result)-1].version != currentVersion {
+		return nil, fmt.Errorf("embedded migrations do not end at schema version %d", currentVersion)
 	}
 	return result, nil
 }
