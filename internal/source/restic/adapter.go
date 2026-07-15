@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"io/fs"
 	"net/url"
 	"os"
 	"os/exec"
@@ -233,17 +234,11 @@ func (adapter *Adapter) run(ctx context.Context, operation string, environment [
 	command.Stdout = &stdout
 	command.Stderr = &stderr
 	err := command.Run()
+	if ctx.Err() != nil {
+		return nil, nil, contextFailure(operation, ctx.Err())
+	}
 	if stdout.over || stderr.over || errors.Is(err, errOutputLimit) {
 		return nil, nil, &source.Failure{Kind: source.FailureOutputLimit, Operation: operation, SafeHint: "restic output exceeded the configured limit"}
-	}
-	if ctx.Err() != nil {
-		kind := source.FailureCancelled
-		hint := "restic operation was cancelled"
-		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
-			kind = source.FailureTimeout
-			hint = "restic operation timed out"
-		}
-		return nil, nil, &source.Failure{Kind: kind, Operation: operation, SafeHint: hint}
 	}
 	if err != nil {
 		var exitError *exec.ExitError
@@ -281,12 +276,12 @@ func (adapter *Adapter) ListRecoveryPoints(ctx context.Context) ([]source.Recove
 		return nil, err
 	}
 
-	var snapshots []snapshotMessage
-	if err := json.Unmarshal(stdout, &snapshots); err != nil {
+	var snapshots *[]snapshotMessage
+	if err := json.Unmarshal(stdout, &snapshots); err != nil || snapshots == nil {
 		return nil, &source.Failure{Kind: source.FailureCorruptOutput, Operation: "list", SafeHint: "restic returned invalid snapshot JSON"}
 	}
-	points := make([]source.RecoveryPoint, 0, len(snapshots))
-	for _, snapshot := range snapshots {
+	points := make([]source.RecoveryPoint, 0, len(*snapshots))
+	for _, snapshot := range *snapshots {
 		createdAt, err := time.Parse(time.RFC3339Nano, snapshot.Time)
 		if err != nil || !snapshotIDPattern.MatchString(snapshot.ID) {
 			return nil, &source.Failure{Kind: source.FailureCorruptOutput, Operation: "list", SafeHint: "restic returned invalid snapshot metadata"}
@@ -317,15 +312,19 @@ func (adapter *Adapter) withCredentialEnvironment(
 	if err != nil {
 		return &source.Failure{Kind: source.FailureUnavailable, Operation: operation, SafeHint: "temporary credential storage is unavailable"}
 	}
-	if err := os.Chmod(directory, 0o700); err != nil {
-		_ = os.RemoveAll(directory)
-		return &source.Failure{Kind: source.FailureUnavailable, Operation: operation, SafeHint: "temporary credential storage is unavailable"}
-	}
 	defer func() {
-		if err := os.RemoveAll(directory); err != nil && returnErr == nil {
-			returnErr = &source.Failure{Kind: source.FailureProcess, Operation: operation, SafeHint: "temporary credential files could not be removed"}
+		if err := removePrivateTree(directory); err != nil {
+			cleanupFailure := &source.Failure{Kind: source.FailureProcess, Operation: operation, SafeHint: "temporary credential files could not be removed"}
+			if returnErr == nil {
+				returnErr = cleanupFailure
+			} else {
+				returnErr = errors.Join(returnErr, cleanupFailure)
+			}
 		}
 	}()
+	if err := os.Chmod(directory, 0o700); err != nil {
+		return &source.Failure{Kind: source.FailureUnavailable, Operation: operation, SafeHint: "temporary credential storage is unavailable"}
+	}
 
 	password, err := adapter.resolver.Resolve(ctx, adapter.config.Password)
 	if err != nil {
@@ -433,6 +432,25 @@ func zero(value []byte) {
 	}
 }
 
+func removePrivateTree(path string) error {
+	if err := os.RemoveAll(path); err == nil {
+		return nil
+	}
+	_ = os.Chmod(path, 0o700)
+	_ = filepath.WalkDir(path, func(current string, entry fs.DirEntry, _ error) error {
+		if entry != nil && entry.Type()&os.ModeSymlink != 0 {
+			return nil
+		}
+		mode := fs.FileMode(0o600)
+		if entry != nil && entry.IsDir() {
+			mode = 0o700
+		}
+		_ = os.Chmod(current, mode)
+		return nil
+	})
+	return os.RemoveAll(path)
+}
+
 type restoreEnvelope struct {
 	MessageType string `json:"message_type"`
 }
@@ -447,16 +465,16 @@ type restoreStatus struct {
 }
 
 type restoreSummary struct {
-	MessageType   string `json:"message_type"`
-	FilesRestored uint64 `json:"files_restored"`
-	TotalFiles    uint64 `json:"total_files"`
-	BytesRestored uint64 `json:"bytes_restored"`
-	TotalBytes    uint64 `json:"total_bytes"`
+	MessageType   string  `json:"message_type"`
+	FilesRestored *uint64 `json:"files_restored"`
+	TotalFiles    *uint64 `json:"total_files"`
+	BytesRestored *uint64 `json:"bytes_restored"`
+	TotalBytes    *uint64 `json:"total_bytes"`
 }
 
 // Acquire restores one full snapshot into a private staging child, then
 // atomically promotes it after a valid completion summary.
-func (adapter *Adapter) Acquire(ctx context.Context, request source.AcquireRequest) (source.Artifact, error) {
+func (adapter *Adapter) Acquire(ctx context.Context, request source.AcquireRequest) (_ source.Artifact, returnErr error) {
 	if !snapshotIDPattern.MatchString(request.RecoveryPointID) {
 		return source.Artifact{}, &source.Failure{Kind: source.FailureInvalidInput, Operation: "acquire", SafeHint: "a full restic snapshot ID is required"}
 	}
@@ -475,7 +493,14 @@ func (adapter *Adapter) Acquire(ctx context.Context, request source.AcquireReque
 	promoted := false
 	defer func() {
 		if !promoted {
-			_ = os.RemoveAll(staging)
+			if err := removePrivateTree(staging); err != nil {
+				cleanupFailure := &source.Failure{Kind: source.FailureProcess, Operation: "acquire", SafeHint: "partial acquired data could not be removed"}
+				if returnErr == nil {
+					returnErr = cleanupFailure
+				} else {
+					returnErr = errors.Join(returnErr, cleanupFailure)
+				}
+			}
 		}
 	}()
 
@@ -526,9 +551,15 @@ func (adapter *Adapter) runRestore(
 	command.Stderr = &stderr
 	stdout, err := command.StdoutPipe()
 	if err != nil {
+		if ctx.Err() != nil {
+			return contextFailure("acquire", ctx.Err())
+		}
 		return &source.Failure{Kind: source.FailureProcess, Operation: "acquire"}
 	}
 	if err := command.Start(); err != nil {
+		if ctx.Err() != nil {
+			return contextFailure("acquire", ctx.Err())
+		}
 		return &source.Failure{Kind: source.FailureUnavailable, Operation: "acquire", SafeHint: "restic could not be started"}
 	}
 
@@ -545,6 +576,9 @@ func (adapter *Adapter) runRestore(
 		if err != nil {
 			cancel()
 			_ = command.Wait()
+			if ctx.Err() != nil {
+				return contextFailure("acquire", ctx.Err())
+			}
 			if limited.N == 0 {
 				return &source.Failure{Kind: source.FailureOutputLimit, Operation: "acquire", SafeHint: "restic output exceeded the configured limit"}
 			}
@@ -555,6 +589,9 @@ func (adapter *Adapter) runRestore(
 		if err := json.Unmarshal(raw, &envelope); err != nil {
 			cancel()
 			_ = command.Wait()
+			if ctx.Err() != nil {
+				return contextFailure("acquire", ctx.Err())
+			}
 			return &source.Failure{Kind: source.FailureCorruptOutput, Operation: "acquire", SafeHint: "restic returned invalid restore JSON"}
 		}
 		switch envelope.MessageType {
@@ -563,6 +600,9 @@ func (adapter *Adapter) runRestore(
 			if err := json.Unmarshal(raw, &status); err != nil || status.PercentDone < lastPercent || status.PercentDone < 0 || status.PercentDone > 1 || status.FilesRestored > status.TotalFiles || status.BytesRestored > status.TotalBytes {
 				cancel()
 				_ = command.Wait()
+				if ctx.Err() != nil {
+					return contextFailure("acquire", ctx.Err())
+				}
 				return &source.Failure{Kind: source.FailureCorruptOutput, Operation: "acquire", SafeHint: "restic returned invalid restore progress"}
 			}
 			lastPercent = status.PercentDone
@@ -577,19 +617,22 @@ func (adapter *Adapter) runRestore(
 			}
 		case "summary":
 			var summary restoreSummary
-			if err := json.Unmarshal(raw, &summary); err != nil || summary.FilesRestored > summary.TotalFiles || summary.BytesRestored > summary.TotalBytes {
+			if err := json.Unmarshal(raw, &summary); err != nil || summary.FilesRestored == nil || summary.TotalFiles == nil || summary.BytesRestored == nil || summary.TotalBytes == nil || *summary.FilesRestored > *summary.TotalFiles || *summary.BytesRestored > *summary.TotalBytes {
 				cancel()
 				_ = command.Wait()
+				if ctx.Err() != nil {
+					return contextFailure("acquire", ctx.Err())
+				}
 				return &source.Failure{Kind: source.FailureCorruptOutput, Operation: "acquire", SafeHint: "restic returned invalid restore summary"}
 			}
 			summarySeen = true
 			if report != nil && lastPercent < 1 {
 				report(source.Progress{
 					PercentDone: 1,
-					FilesDone:   summary.FilesRestored,
-					TotalFiles:  summary.TotalFiles,
-					BytesDone:   summary.BytesRestored,
-					TotalBytes:  summary.TotalBytes,
+					FilesDone:   *summary.FilesRestored,
+					TotalFiles:  *summary.TotalFiles,
+					BytesDone:   *summary.BytesRestored,
+					TotalBytes:  *summary.TotalBytes,
 				})
 			}
 		default:
@@ -599,14 +642,17 @@ func (adapter *Adapter) runRestore(
 	if limited.N == 0 {
 		cancel()
 		_ = command.Wait()
+		if ctx.Err() != nil {
+			return contextFailure("acquire", ctx.Err())
+		}
 		return &source.Failure{Kind: source.FailureOutputLimit, Operation: "acquire", SafeHint: "restic output exceeded the configured limit"}
 	}
 	err = command.Wait()
-	if stderr.over {
-		return &source.Failure{Kind: source.FailureOutputLimit, Operation: "acquire", SafeHint: "restic output exceeded the configured limit"}
-	}
 	if ctx.Err() != nil {
 		return contextFailure("acquire", ctx.Err())
+	}
+	if stderr.over {
+		return &source.Failure{Kind: source.FailureOutputLimit, Operation: "acquire", SafeHint: "restic output exceeded the configured limit"}
 	}
 	if err != nil {
 		var exitError *exec.ExitError

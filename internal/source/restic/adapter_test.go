@@ -129,6 +129,25 @@ test "$(find "$RESTIC_PASSWORD_FILE" -perm 0600 -print)" = "$RESTIC_PASSWORD_FIL
 	}
 }
 
+func TestListRejectsNullSnapshotArray(t *testing.T) {
+	t.Parallel()
+
+	credentialTempDir := t.TempDir()
+	adapter := newTestAdapter(t, resticadapter.Config{
+		Binary:            writeFakeRestic(t, "null"),
+		Repository:        resticadapter.Repository{Kind: resticadapter.RepositoryLocal, Location: t.TempDir()},
+		Password:          drill.CredentialReference{Provider: drill.CredentialEnvironment, Locator: "REHEARSE_TEST_RESTIC_PASSWORD"},
+		CredentialTempDir: credentialTempDir,
+	})
+
+	_, err := adapter.ListRecoveryPoints(context.Background())
+	var failure *source.Failure
+	if !errors.As(err, &failure) || failure.Kind != source.FailureCorruptOutput {
+		t.Fatalf("failure = %+v, want corrupt output", failure)
+	}
+	assertDirectoryEmpty(t, credentialTempDir)
+}
+
 func TestS3CredentialsAreMaterializedOnlyInPermissionRestrictedFiles(t *testing.T) {
 	t.Parallel()
 
@@ -143,6 +162,7 @@ grep -q '^aws_access_key_id = fixture-access-key$' "$AWS_SHARED_CREDENTIALS_FILE
 grep -q '^aws_secret_access_key = fixture-secret-key$' "$AWS_SHARED_CREDENTIALS_FILE" || exit 97
 grep -q '^aws_session_token = fixture-session-token$' "$AWS_SHARED_CREDENTIALS_FILE" || exit 98
 printf '%s\n' '[]'
+chmod 0000 "$(dirname "$RESTIC_PASSWORD_FILE")"
 `)
 	references := map[string][]byte{
 		"PASSWORD":      []byte("fixture-password"),
@@ -273,6 +293,150 @@ printf '%s\n' '{"message_type":"summary","files_restored":2,"total_files":2,"byt
 	}
 }
 
+func TestAcquireRequiresCompleteSummaryBeforePromotion(t *testing.T) {
+	t.Parallel()
+
+	const recoveryPointID = "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"
+	tests := []struct {
+		name    string
+		summary string
+	}{
+		{name: "all completion fields missing", summary: `{"message_type":"summary"}`},
+		{name: "files restored missing", summary: `{"message_type":"summary","total_files":0,"bytes_restored":0,"total_bytes":0}`},
+		{name: "total files missing", summary: `{"message_type":"summary","files_restored":0,"bytes_restored":0,"total_bytes":0}`},
+		{name: "bytes restored missing", summary: `{"message_type":"summary","files_restored":0,"total_files":0,"total_bytes":0}`},
+		{name: "total bytes missing", summary: `{"message_type":"summary","files_restored":0,"total_files":0,"bytes_restored":0}`},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+
+			workspace := t.TempDir()
+			credentialTempDir := t.TempDir()
+			binary := writeFakeResticScript(t, `
+target=""
+while test "$#" -gt 0; do
+  if test "$1" = "--target"; then target="$2"; shift; fi
+  shift
+done
+mkdir -p "$target/private"
+printf 'partial-private-content' > "$target/private/item"
+printf '%s\n' '`+test.summary+`'
+`)
+			adapter := newTestAdapter(t, resticadapter.Config{
+				Binary:            binary,
+				Repository:        resticadapter.Repository{Kind: resticadapter.RepositoryLocal, Location: t.TempDir()},
+				Password:          drill.CredentialReference{Provider: drill.CredentialEnvironment, Locator: "REHEARSE_TEST_RESTIC_PASSWORD"},
+				CredentialTempDir: credentialTempDir,
+			})
+
+			_, err := adapter.Acquire(context.Background(), source.AcquireRequest{
+				RecoveryPointID: recoveryPointID,
+				Workspace:       workspace,
+			})
+			var failure *source.Failure
+			if !errors.As(err, &failure) || failure.Kind != source.FailureCorruptOutput {
+				t.Fatalf("failure = %+v, want corrupt output", failure)
+			}
+			assertDirectoryEmpty(t, workspace)
+			assertDirectoryEmpty(t, credentialTempDir)
+		})
+	}
+}
+
+func TestAcquireContextFailureTakesPrecedenceOverBoundaryErrors(t *testing.T) {
+	t.Parallel()
+
+	const recoveryPointID = "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"
+	tests := []struct {
+		name         string
+		body         string
+		maxStdout    int64
+		maxStderr    int64
+		removeBinary bool
+		preCancel    bool
+	}{
+		{
+			name:         "process start",
+			body:         "exit 0\n",
+			maxStdout:    1024,
+			maxStderr:    1024,
+			removeBinary: true,
+			preCancel:    true,
+		},
+		{
+			name: "JSON decode",
+			body: `
+printf '%s\n' '{"message_type":"status","percent_done":0.1,"files_restored":1,"total_files":10,"bytes_restored":1,"total_bytes":10}'
+printf '%s\n' '{not-json'
+`,
+			maxStdout: 1024,
+			maxStderr: 1024,
+		},
+		{
+			name: "stdout limit",
+			body: `
+printf '%s\n' '{"message_type":"status","percent_done":0.1,"files_restored":1,"total_files":10,"bytes_restored":1,"total_bytes":10}'
+printf '%s' '{"message_type":"future","private":"` + strings.Repeat("x", 256) + `"}'
+`,
+			maxStdout: 160,
+			maxStderr: 1024,
+		},
+		{
+			name: "stderr limit",
+			body: `
+printf '%s' '` + strings.Repeat("private-stderr-marker", 16) + `' >&2
+printf '%s\n' '{"message_type":"status","percent_done":0.1,"files_restored":1,"total_files":10,"bytes_restored":1,"total_bytes":10}'
+`,
+			maxStdout: 1024,
+			maxStderr: 64,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+
+			workspace := t.TempDir()
+			credentialTempDir := t.TempDir()
+			binary := writeFakeResticScript(t, test.body)
+			adapter := newTestAdapter(t, resticadapter.Config{
+				Binary:            binary,
+				Repository:        resticadapter.Repository{Kind: resticadapter.RepositoryLocal, Location: t.TempDir()},
+				Password:          drill.CredentialReference{Provider: drill.CredentialEnvironment, Locator: "REHEARSE_TEST_RESTIC_PASSWORD"},
+				CredentialTempDir: credentialTempDir,
+				MaxStdoutBytes:    test.maxStdout,
+				MaxStderrBytes:    test.maxStderr,
+			})
+			if test.removeBinary {
+				if err := os.Remove(binary); err != nil {
+					t.Fatalf("remove fake restic: %v", err)
+				}
+			}
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			if test.preCancel {
+				cancel()
+			}
+
+			_, err := adapter.Acquire(ctx, source.AcquireRequest{
+				RecoveryPointID: recoveryPointID,
+				Workspace:       workspace,
+				Report: func(source.Progress) {
+					cancel()
+				},
+			})
+			var failure *source.Failure
+			if !errors.As(err, &failure) || failure.Kind != source.FailureCancelled {
+				t.Fatalf("failure = %+v, want cancelled", failure)
+			}
+			assertDirectoryEmpty(t, workspace)
+			assertDirectoryEmpty(t, credentialTempDir)
+		})
+	}
+}
+
 func TestAcquireCancellationAndTimeoutRemovePartialStateAndCredentials(t *testing.T) {
 	t.Parallel()
 
@@ -390,6 +554,7 @@ while test "$#" -gt 0; do
 done
 mkdir -p "$target/private"
 printf 'partial-private-content' > "$target/private/item"
+chmod 0000 "$target/private" "$target"
 printf '%s\n' '{not-json'
 `)
 			adapter := newTestAdapter(t, resticadapter.Config{
@@ -415,6 +580,78 @@ printf '%s\n' '{not-json'
 			assertDirectoryEmpty(t, workspace)
 			assertDirectoryEmpty(t, credentialTempDir)
 		})
+	}
+}
+
+func TestAcquirePreservesPrimaryFailureWhenStagingCleanupFails(t *testing.T) {
+	t.Parallel()
+
+	const recoveryPointID = "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"
+	workspace := t.TempDir()
+	t.Cleanup(func() { _ = os.Chmod(workspace, 0o700) })
+	adapter := newTestAdapter(t, resticadapter.Config{
+		Binary: writeFakeResticScript(t, `
+target=""
+while test "$#" -gt 0; do
+  if test "$1" = "--target"; then target="$2"; shift; fi
+  shift
+done
+mkdir -p "$target/private"
+printf 'partial-private-content' > "$target/private/item"
+chmod 0500 "$(dirname "$target")"
+printf '%s\n' '{not-json'
+`),
+		Repository:        resticadapter.Repository{Kind: resticadapter.RepositoryLocal, Location: t.TempDir()},
+		Password:          drill.CredentialReference{Provider: drill.CredentialEnvironment, Locator: "REHEARSE_TEST_RESTIC_PASSWORD"},
+		CredentialTempDir: t.TempDir(),
+	})
+
+	_, err := adapter.Acquire(context.Background(), source.AcquireRequest{
+		RecoveryPointID: recoveryPointID,
+		Workspace:       workspace,
+	})
+	if chmodErr := os.Chmod(workspace, 0o700); chmodErr != nil {
+		t.Fatalf("restore workspace permissions: %v", chmodErr)
+	}
+	if !hasSourceFailure(err, source.FailureCorruptOutput, "restic returned invalid restore JSON") {
+		t.Fatalf("error = %v, want preserved corrupt-output failure", err)
+	}
+	if !hasSourceFailure(err, source.FailureProcess, "partial acquired data could not be removed") {
+		t.Fatalf("error = %v, want typed staging-cleanup failure", err)
+	}
+	if strings.Contains(err.Error(), "partial-private-content") || strings.Contains(err.Error(), workspace) {
+		t.Fatalf("private staging data leaked through error: %v", err)
+	}
+}
+
+func TestListPreservesPrimaryFailureWhenCredentialCleanupFails(t *testing.T) {
+	t.Parallel()
+
+	credentialTempDir := t.TempDir()
+	t.Cleanup(func() { _ = os.Chmod(credentialTempDir, 0o700) })
+	adapter := newTestAdapter(t, resticadapter.Config{
+		Binary: writeFakeResticScript(t, `
+chmod 0500 "$(dirname "$(dirname "$RESTIC_PASSWORD_FILE")")"
+printf '%s\n' '{"message_type":"exit_error","code":12,"message":"private-credential-marker"}' >&2
+exit 12
+`),
+		Repository:        resticadapter.Repository{Kind: resticadapter.RepositoryLocal, Location: t.TempDir()},
+		Password:          drill.CredentialReference{Provider: drill.CredentialEnvironment, Locator: "REHEARSE_TEST_RESTIC_PASSWORD"},
+		CredentialTempDir: credentialTempDir,
+	})
+
+	_, err := adapter.ListRecoveryPoints(context.Background())
+	if chmodErr := os.Chmod(credentialTempDir, 0o700); chmodErr != nil {
+		t.Fatalf("restore credential temp permissions: %v", chmodErr)
+	}
+	if !hasSourceFailure(err, source.FailureAuthentication, "restic repository credentials were rejected") {
+		t.Fatalf("error = %v, want preserved authentication failure", err)
+	}
+	if !hasSourceFailure(err, source.FailureProcess, "temporary credential files could not be removed") {
+		t.Fatalf("error = %v, want typed credential-cleanup failure", err)
+	}
+	if strings.Contains(err.Error(), "private-credential-marker") {
+		t.Fatalf("private credential data leaked through error: %v", err)
 	}
 }
 
@@ -726,4 +963,21 @@ func assertDirectoryEmpty(t *testing.T, directory string) {
 	if len(entries) != 0 {
 		t.Fatalf("directory %s is not empty: %v", directory, entries)
 	}
+}
+
+func hasSourceFailure(err error, kind source.FailureKind, safeHint string) bool {
+	if failure, ok := err.(*source.Failure); ok && failure.Kind == kind && failure.SafeHint == safeHint {
+		return true
+	}
+	if joined, ok := err.(interface{ Unwrap() []error }); ok {
+		for _, nested := range joined.Unwrap() {
+			if hasSourceFailure(nested, kind, safeHint) {
+				return true
+			}
+		}
+	}
+	if wrapped, ok := err.(interface{ Unwrap() error }); ok {
+		return hasSourceFailure(wrapped.Unwrap(), kind, safeHint)
+	}
+	return false
 }

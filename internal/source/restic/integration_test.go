@@ -225,6 +225,7 @@ func TestS3CompatibleRepositoryListAndAcquireAreReadOnlyAtTheMinIOBoundary(t *te
 		"ACCESS_KEY": []byte(accessKey),
 		"SECRET_KEY": []byte(secretKey),
 	}
+	credentialTempDir := t.TempDir()
 	adapter, err := resticadapter.New(resticadapter.Config{
 		Binary: binary,
 		Repository: resticadapter.Repository{
@@ -236,7 +237,7 @@ func TestS3CompatibleRepositoryListAndAcquireAreReadOnlyAtTheMinIOBoundary(t *te
 			AccessKeyID:     drill.CredentialReference{Provider: drill.CredentialEnvironment, Locator: "ACCESS_KEY"},
 			SecretAccessKey: drill.CredentialReference{Provider: drill.CredentialEnvironment, Locator: "SECRET_KEY"},
 		},
-		CredentialTempDir: t.TempDir(),
+		CredentialTempDir: credentialTempDir,
 	}, credentialResolver(func(_ context.Context, reference drill.CredentialReference) ([]byte, error) {
 		return append([]byte(nil), values[reference.Locator]...), nil
 	}))
@@ -264,6 +265,46 @@ func TestS3CompatibleRepositoryListAndAcquireAreReadOnlyAtTheMinIOBoundary(t *te
 	if string(contents) != "seeded-s3-order-84" {
 		t.Fatalf("S3-restored contents = %q", contents)
 	}
+	assertDirectoryEmpty(t, credentialTempDir)
+
+	const (
+		wrongAccessKey = "private-wrong-s3-access-key"
+		wrongSecretKey = "private-wrong-s3-secret-key"
+	)
+	failureCredentialTempDir := t.TempDir()
+	failureValues := map[string][]byte{
+		"PASSWORD":   []byte("real-s3-boundary-password"),
+		"ACCESS_KEY": []byte(wrongAccessKey),
+		"SECRET_KEY": []byte(wrongSecretKey),
+	}
+	failureAdapter, err := resticadapter.New(resticadapter.Config{
+		Binary: binary,
+		Repository: resticadapter.Repository{
+			Kind:     resticadapter.RepositoryS3,
+			Location: repository,
+		},
+		Password: drill.CredentialReference{Provider: drill.CredentialEnvironment, Locator: "PASSWORD"},
+		S3Credentials: &resticadapter.S3Credentials{
+			AccessKeyID:     drill.CredentialReference{Provider: drill.CredentialEnvironment, Locator: "ACCESS_KEY"},
+			SecretAccessKey: drill.CredentialReference{Provider: drill.CredentialEnvironment, Locator: "SECRET_KEY"},
+		},
+		CredentialTempDir: failureCredentialTempDir,
+	}, credentialResolver(func(_ context.Context, reference drill.CredentialReference) ([]byte, error) {
+		return append([]byte(nil), failureValues[reference.Locator]...), nil
+	}))
+	if err != nil {
+		t.Fatalf("new failing S3 adapter: %v", err)
+	}
+	_, err = failureAdapter.ListRecoveryPoints(ctx)
+	var failure *source.Failure
+	if !errors.As(err, &failure) || failure.Kind != source.FailureProcess {
+		t.Fatalf("failure = %+v, want typed process failure", failure)
+	}
+	if strings.Contains(err.Error(), wrongAccessKey) || strings.Contains(err.Error(), wrongSecretKey) || strings.Contains(err.Error(), repository) {
+		t.Fatalf("private S3 boundary data leaked through error: %v", err)
+	}
+	assertDirectoryEmpty(t, failureCredentialTempDir)
+
 	after := minioObjectDigest(t, ctx, client, bucket)
 	if before != after {
 		t.Fatalf("S3 source repository changed during list/acquire: before=%s after=%s", before, after)
