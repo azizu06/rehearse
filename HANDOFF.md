@@ -2,11 +2,11 @@
 
 ## Current state
 
-Rehearse has an approved product definition and engineering foundation. Product code has intentionally not started. GitHub Issues and the project board define the implementation order.
+Rehearse has an approved product definition, a tested Go/React tracer bullet, and the durable drill state machine and SQLite journal described in [ADR 0004](docs/adr/0004-durable-run-journal.md). GitHub Issues and the project board define the implementation order and current status.
 
-## First implementation task
+## Next implementation task
 
-Start with GitHub Issue [#5](https://github.com/azizu06/rehearse/issues/5), **Scaffold the tested Go + React tracer bullet**. GitHub numbers pull requests and issues in one sequence, so automated Dependabot pull requests consumed #1-#4 during setup. Create an isolated worktree and branch named from #5. Build the smallest end-to-end tracer bullet test first; do not split into disconnected backend/frontend scaffolds that cannot prove the product loop.
+Select one issue whose dependencies are closed from the live [GitHub Project](https://github.com/users/azizu06/projects/4), then create an isolated worktree and issue-named branch. The dependency shape is summarized in [docs/roadmap/issue-map.md](docs/roadmap/issue-map.md), but the live project remains authoritative for actionability.
 
 ## Required opening sequence
 

@@ -4,7 +4,7 @@
 
 Rehearse is an open-source recovery-drill platform for self-hosted applications. It restores a real backup into an isolated Docker Compose environment, starts the application, runs application-level probes, records recovery time and failures, and removes the temporary environment.
 
-> Project status: foundation phase. The public v0.1 tracer bullet is being built in the open; installation instructions will appear once the first complete recovery drill is reliable.
+> Project status: foundation phase. The tested Go/React tracer bullet and durable drill journal are in place; installation instructions will appear once the first complete recovery drill is reliable.
 
 ## Why Rehearse
 

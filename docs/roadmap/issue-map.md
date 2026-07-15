@@ -23,4 +23,4 @@ The live [GitHub Project](https://github.com/users/azizu06/projects/4) is author
 | [#21](https://github.com/azizu06/rehearse/issues/21) | External beta + product demo | #15-#20 | v1.0 |
 | [#22](https://github.com/azizu06/rehearse/issues/22) | Final completion audit + v1 release | #16-#21 | v1.0 |
 
-Only #5 is currently unblocked. When a prerequisite closes, the coordinator verifies all remaining dependencies before removing the `blocked` label from a newly actionable issue.
+For current actionability, use the live project. When a prerequisite closes, the coordinator verifies all remaining dependencies before removing the `blocked` label from a newly actionable issue.
