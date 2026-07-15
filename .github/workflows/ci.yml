@@ -70,6 +70,22 @@ jobs:
         run: npm --prefix web exec -- playwright install chromium
       - run: make test-browser
 
+  docker-sandbox-integration:
+    name: Docker sandbox integration (ubuntu-latest)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: false
+      - run: docker version
+      - run: docker compose version
+      - run: docker pull alpine@sha256:28bd5fe8b56d1bd048e5babf5b10710ebe0bae67db86916198a6eec434943f8b
+      - run: go test -race ./internal/sandbox -count=1
+        env:
+          REHEARSE_DOCKER_INTEGRATION: "1"
+
   static-security:
     runs-on: ubuntu-latest
     steps:

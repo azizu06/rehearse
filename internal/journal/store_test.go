@@ -170,6 +170,60 @@ func TestRestartMarksUnfinishedRunsForReconciliationWithoutLosingHistory(t *test
 	}
 }
 
+func TestCleanupFailureRemainsInDurableReconciliationQueueAcrossRestarts(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "rehearse.db")
+	now := time.Date(2026, time.July, 15, 17, 0, 0, 0, time.UTC)
+	store, _, run := createPlanAndRun(t, ctx, path, now)
+	if _, err := store.RecordOutcome(ctx, run.ID, drill.OutcomeFailed, now.Add(time.Second)); err != nil {
+		t.Fatalf("RecordOutcome: %v", err)
+	}
+	failed, err := store.RecordCleanup(ctx, run.ID, drill.CleanupFailed, now.Add(2*time.Second))
+	if err != nil {
+		t.Fatalf("RecordCleanup(failed): %v", err)
+	}
+	if !failed.NeedsReconciliation {
+		t.Fatal("cleanup failure was not queued for retry")
+	}
+	queued, err := store.RunsNeedingReconciliation(ctx)
+	if err != nil || len(queued) != 1 || queued[0].ID != run.ID {
+		t.Fatalf("queued runs = %#v, error %v", queued, err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	reopened, err := journal.Open(ctx, path)
+	if err != nil {
+		t.Fatalf("reopen: %v", err)
+	}
+	t.Cleanup(func() { _ = reopened.Close() })
+	queued, err = reopened.RunsNeedingReconciliation(ctx)
+	if err != nil || len(queued) != 1 || queued[0].Cleanup != drill.CleanupFailed {
+		t.Fatalf("reopened queue = %#v, error %v", queued, err)
+	}
+	retrying, err := reopened.BeginCleanupRetry(ctx, run.ID, now.Add(3*time.Second))
+	if err != nil {
+		t.Fatalf("BeginCleanupRetry: %v", err)
+	}
+	if retrying.Cleanup != drill.CleanupPending || !retrying.NeedsReconciliation {
+		t.Fatalf("retrying projection = %#v", retrying)
+	}
+	completed, err := reopened.RecordCleanup(ctx, run.ID, drill.CleanupSucceeded, now.Add(4*time.Second))
+	if err != nil {
+		t.Fatalf("RecordCleanup(succeeded): %v", err)
+	}
+	if completed.NeedsReconciliation {
+		t.Fatal("successful cleanup remained queued")
+	}
+	queued, err = reopened.RunsNeedingReconciliation(ctx)
+	if err != nil || len(queued) != 0 {
+		t.Fatalf("queue after success = %#v, error %v", queued, err)
+	}
+}
+
 func TestRestartPreservesImmutablePlanVersionHistory(t *testing.T) {
 	t.Parallel()
 

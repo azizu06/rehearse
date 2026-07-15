@@ -221,6 +221,45 @@ func (store *Store) RecordCleanup(ctx context.Context, id string, status drill.C
 	})
 }
 
+// BeginCleanupRetry moves a failed cleanup back to pending while preserving
+// the execution outcome and durable reconciliation ownership.
+func (store *Store) BeginCleanupRetry(ctx context.Context, id string, at time.Time) (drill.Run, error) {
+	return store.mutateRun(ctx, id, func(run *drill.Run) (drill.Event, error) {
+		return run.BeginCleanupRetry(at)
+	})
+}
+
+// RunsNeedingReconciliation returns the durable startup janitor queue. Cleanup
+// pending/failed rows remain eligible even if a legacy writer lost the flag.
+func (store *Store) RunsNeedingReconciliation(ctx context.Context) ([]drill.Run, error) {
+	rows, err := store.database.QueryContext(ctx, `
+        SELECT id, plan_id, plan_version, stage, outcome, cleanup_status,
+               created_at, updated_at, version, needs_reconciliation,
+               reconciliation_requested_at
+        FROM runs
+        WHERE needs_reconciliation = 1
+           OR cleanup_status IN ('pending', 'failed')
+        ORDER BY id
+    `)
+	if err != nil {
+		return nil, fmt.Errorf("query reconciliation queue: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	var runs []drill.Run
+	for rows.Next() {
+		run, err := scanRun(rows)
+		if err != nil {
+			return nil, err
+		}
+		runs = append(runs, run)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate reconciliation queue: %w", err)
+	}
+	return runs, nil
+}
+
 // Events returns the immutable run history in sequence order.
 func (store *Store) Events(ctx context.Context, runID string) ([]drill.Event, error) {
 	rows, err := store.database.QueryContext(ctx, `
@@ -322,7 +361,7 @@ func (store *Store) requireRestartReconciliation(ctx context.Context, at time.Ti
                created_at, updated_at, version, needs_reconciliation,
                reconciliation_requested_at
         FROM runs
-        WHERE cleanup_status NOT IN ('succeeded', 'failed')
+        WHERE cleanup_status != 'succeeded'
           AND needs_reconciliation = 0
         ORDER BY id
     `)
@@ -352,16 +391,21 @@ func (store *Store) requireRestartReconciliation(ctx context.Context, at time.Ti
 			eventAt = run.UpdatedAt
 		}
 		previousVersion := run.Version
-		event, err := run.RequireReconciliation(eventAt)
+		var event drill.Event
+		if run.Cleanup == drill.CleanupFailed {
+			event, err = run.BeginCleanupRetry(eventAt)
+		} else {
+			event, err = run.RequireReconciliation(eventAt)
+		}
 		if err != nil {
 			return fmt.Errorf("mark run %s for reconciliation: %w", run.ID, err)
 		}
 		result, err := transaction.ExecContext(ctx, `
             UPDATE runs
-            SET updated_at = ?, version = ?, needs_reconciliation = 1,
+            SET cleanup_status = ?, updated_at = ?, version = ?, needs_reconciliation = 1,
                 reconciliation_requested_at = ?
             WHERE id = ? AND version = ? AND needs_reconciliation = 0
-        `, formatTime(run.UpdatedAt), run.Version, formatTime(run.ReconciliationRequestedAt), run.ID, previousVersion)
+        `, run.Cleanup, formatTime(run.UpdatedAt), run.Version, formatTime(run.ReconciliationRequestedAt), run.ID, previousVersion)
 		if err != nil {
 			return fmt.Errorf("update restart reconciliation: %w", err)
 		}

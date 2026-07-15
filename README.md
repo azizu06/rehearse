@@ -4,7 +4,7 @@
 
 Rehearse is an open-source recovery-drill platform for self-hosted applications. It restores a real backup into an isolated Docker Compose environment, starts the application, runs application-level probes, records recovery time and failures, and removes the temporary environment.
 
-> Project status: foundation phase. The tested Go/React tracer bullet and durable drill journal are in place; installation instructions will appear once the first complete recovery drill is reliable.
+> Project status: foundation phase. The tested Go/React tracer bullet, durable drill journal, and isolated Docker Compose sandbox lifecycle are in place; installation instructions will appear once the first complete recovery drill is reliable.
 
 ## Why Rehearse
 
@@ -62,6 +62,15 @@ make build
 ```
 
 `make security` adds `govulncheck` plus a pinned Trivy filesystem scan. It requires Trivy 0.72.0 on `PATH`, or `TRIVY=/path/to/trivy`; CI installs the same scanner version.
+
+The real sandbox boundary is opt-in locally because it creates short-lived
+labeled Docker resources. It requires the pinned Alpine fixture image to exist
+before the runner starts; the runner itself never builds or pulls images:
+
+```bash
+docker pull alpine@sha256:28bd5fe8b56d1bd048e5babf5b10710ebe0bae67db86916198a6eec434943f8b
+REHEARSE_DOCKER_INTEGRATION=1 go test -race ./internal/sandbox -count=1
+```
 
 `make test` is the single command for the Go and frontend unit suites. To run the browser smoke path against a freshly built native binary:
 
