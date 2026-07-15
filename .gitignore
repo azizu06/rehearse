@@ -7,13 +7,16 @@
 *.db-shm
 *.db-wal
 bin/
+build/
 coverage/
 dist/
+!internal/dashboard/dist/
+!internal/dashboard/dist/**
 node_modules/
 playwright-report/
 test-results/
+*.tsbuildinfo
 .terraform/
 *.tfstate
 *.tfstate.*
 graphify-out/
-

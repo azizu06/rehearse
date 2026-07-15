@@ -1,0 +1,19 @@
+{
+  "compilerOptions": {
+    "composite": true,
+    "skipLibCheck": true,
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+    "allowImportingTsExtensions": true,
+    "strict": true,
+    "noEmit": true,
+    "types": ["node"]
+  },
+  "include": [
+    "eslint.config.js",
+    "playwright.config.ts",
+    "vite.config.ts",
+    "vitest.config.ts",
+    "e2e"
+  ]
+}

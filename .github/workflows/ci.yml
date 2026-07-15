@@ -21,60 +21,76 @@ jobs:
           test -f LICENSE
           test -f docs/agents/review-policy.md
 
-  go:
-    runs-on: ubuntu-latest
+  build-and-test:
+    name: Build and test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
     steps:
       - uses: actions/checkout@v7
-      - name: Detect Go module
-        id: module
-        run: |
-          if test -f go.mod; then
-            echo "present=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "present=false" >> "$GITHUB_OUTPUT"
-          fi
       - uses: actions/setup-go@v6
-        if: steps.module.outputs.present == 'true'
         with:
           go-version-file: go.mod
-          cache: true
-      - if: steps.module.outputs.present == 'true'
-        run: go test ./...
-      - if: steps.module.outputs.present == 'true'
-        run: go test -race ./...
-      - if: steps.module.outputs.present == 'true'
-        run: go vet ./...
-
-  web:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v7
-      - name: Detect web application
-        id: app
-        run: |
-          if test -f web/package.json; then
-            echo "present=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "present=false" >> "$GITHUB_OUTPUT"
-          fi
+          cache: false
       - uses: actions/setup-node@v6
-        if: steps.app.outputs.present == 'true'
         with:
           node-version: 22
           cache: npm
           cache-dependency-path: web/package-lock.json
-      - if: steps.app.outputs.present == 'true'
-        working-directory: web
-        run: npm ci
-      - if: steps.app.outputs.present == 'true'
-        working-directory: web
-        run: npm run lint
-      - if: steps.app.outputs.present == 'true'
-        working-directory: web
-        run: npm run test -- --run
-      - if: steps.app.outputs.present == 'true'
-        working-directory: web
-        run: npm run build
+      - run: npm --prefix web ci
+      - run: make test
+      - run: make test-race
+      - run: make lint
+      - run: make build
+
+  browser-smoke:
+    name: Browser smoke (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: false
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - run: npm --prefix web ci
+      - if: runner.os == 'Linux'
+        run: npm --prefix web exec -- playwright install --with-deps chromium
+      - if: runner.os == 'macOS'
+        run: npm --prefix web exec -- playwright install chromium
+      - run: make test-browser
+
+  static-security:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: false
+      - uses: golangci/golangci-lint-action@v9.3.0
+        with:
+          version: v2.12.2
+      - run: go run golang.org/x/vuln/cmd/govulncheck@v1.6.0 ./...
+      - uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          version: v0.72.0
+          scan-type: fs
+          scan-ref: .
+          scanners: vuln,secret
+          severity: HIGH,CRITICAL
+          exit-code: 1
+          skip-dirs: .git,build,web/node_modules
 
   terraform:
     runs-on: ubuntu-latest
