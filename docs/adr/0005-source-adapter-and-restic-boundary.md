@@ -24,10 +24,14 @@ references, use mode `0600`, and are removed after every success or failure.
 Secret values never enter argv or persisted adapter configuration.
 
 Acquire into a hidden staging child of an empty caller-owned workspace. Promote
-the staging directory atomically only after restic emits a valid completion
-summary. The adapter removes partial staging after process failure, corrupt or
-oversized output, cancellation, timeout, or startup failure. After successful
-promotion, orchestration owns cleanup of the returned artifact.
+the staging directory atomically only after restic exits successfully and emits
+one decoded `message_type: "summary"` completion marker. Restore counters are
+advisory: restic's JSON contract permits zero-valued fields to be omitted, so
+omission decodes as zero while explicit nulls, wrong types, and inconsistent
+restored/total values fail closed. The adapter removes partial staging after
+process failure, corrupt or oversized output, cancellation, timeout, or startup
+failure. After successful promotion, orchestration owns cleanup of the returned
+artifact.
 
 ## Why
 
@@ -41,8 +45,9 @@ prevents a partial restore from masquerading as a usable recovery artifact.
 
 - Adding a fundamental source operation changes the adapter interface; adding a
   provider keeps its configuration outside orchestration.
-- New restic JSON fields and message types are ignored, while missing or invalid
-  required fields fail closed.
+- New restic JSON fields and message types are ignored. A missing completion
+  marker or invalid known field fails closed; omitted zero-valued counters do
+  not.
 - Local and S3-compatible restic repositories are supported only after their
   real integration, failure, immutability, redaction, and cleanup tests pass.
 - Successful artifact cleanup belongs to later orchestration and janitor work;

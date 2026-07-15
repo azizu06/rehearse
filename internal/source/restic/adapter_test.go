@@ -293,7 +293,7 @@ printf '%s\n' '{"message_type":"summary","files_restored":2,"total_files":2,"byt
 	}
 }
 
-func TestAcquireRequiresCompleteSummaryBeforePromotion(t *testing.T) {
+func TestAcquireRejectsInvalidOrMissingSummaryBeforePromotion(t *testing.T) {
 	t.Parallel()
 
 	const recoveryPointID = "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"
@@ -301,11 +301,17 @@ func TestAcquireRequiresCompleteSummaryBeforePromotion(t *testing.T) {
 		name    string
 		summary string
 	}{
-		{name: "all completion fields missing", summary: `{"message_type":"summary"}`},
-		{name: "files restored missing", summary: `{"message_type":"summary","total_files":0,"bytes_restored":0,"total_bytes":0}`},
-		{name: "total files missing", summary: `{"message_type":"summary","files_restored":0,"bytes_restored":0,"total_bytes":0}`},
-		{name: "bytes restored missing", summary: `{"message_type":"summary","files_restored":0,"total_files":0,"total_bytes":0}`},
-		{name: "total bytes missing", summary: `{"message_type":"summary","files_restored":0,"total_files":0,"bytes_restored":0}`},
+		{name: "completion marker missing", summary: `{"message_type":"future_summary"}`},
+		{name: "files restored null", summary: `{"message_type":"summary","files_restored":null}`},
+		{name: "total files null", summary: `{"message_type":"summary","total_files":null}`},
+		{name: "bytes restored null", summary: `{"message_type":"summary","bytes_restored":null}`},
+		{name: "total bytes null", summary: `{"message_type":"summary","total_bytes":null}`},
+		{name: "files restored wrong type", summary: `{"message_type":"summary","files_restored":"0"}`},
+		{name: "total files wrong type", summary: `{"message_type":"summary","total_files":false}`},
+		{name: "bytes restored wrong type", summary: `{"message_type":"summary","bytes_restored":0.5}`},
+		{name: "total bytes wrong type", summary: `{"message_type":"summary","total_bytes":[]}`},
+		{name: "files exceed total", summary: `{"message_type":"summary","files_restored":1}`},
+		{name: "bytes exceed total", summary: `{"message_type":"summary","bytes_restored":1}`},
 	}
 
 	for _, test := range tests {
@@ -342,6 +348,47 @@ printf '%s\n' '`+test.summary+`'
 			assertDirectoryEmpty(t, workspace)
 			assertDirectoryEmpty(t, credentialTempDir)
 		})
+	}
+}
+
+func TestAcquirePromotesEmptyRestoreWithSummaryMarker(t *testing.T) {
+	t.Parallel()
+
+	const recoveryPointID = "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"
+	credentialTempDir := t.TempDir()
+	adapter := newTestAdapter(t, resticadapter.Config{
+		Binary: writeFakeResticScript(t, `
+printf '%s\n' '{"message_type":"summary"}'
+`),
+		Repository:        resticadapter.Repository{Kind: resticadapter.RepositoryLocal, Location: t.TempDir()},
+		Password:          drill.CredentialReference{Provider: drill.CredentialEnvironment, Locator: "REHEARSE_TEST_RESTIC_PASSWORD"},
+		CredentialTempDir: credentialTempDir,
+	})
+	workspace := t.TempDir()
+
+	artifact, err := adapter.Acquire(context.Background(), source.AcquireRequest{
+		RecoveryPointID: recoveryPointID,
+		Workspace:       workspace,
+	})
+	if err != nil {
+		t.Fatalf("acquire empty restore: %v", err)
+	}
+	if artifact.Kind != source.ArtifactDirectory || artifact.RecoveryPointID != recoveryPointID {
+		t.Fatalf("unexpected artifact: %+v", artifact)
+	}
+	entries, err := os.ReadDir(artifact.Path)
+	if err != nil {
+		t.Fatalf("read promoted artifact: %v", err)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("empty restore artifact contains entries: %v", entries)
+	}
+	credentialEntries, err := os.ReadDir(credentialTempDir)
+	if err != nil {
+		t.Fatalf("read credential temp dir: %v", err)
+	}
+	if len(credentialEntries) != 0 {
+		t.Fatalf("credential files remain after acquire: %v", credentialEntries)
 	}
 }
 

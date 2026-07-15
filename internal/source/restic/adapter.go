@@ -456,11 +456,27 @@ type restoreStatus struct {
 }
 
 type restoreSummary struct {
-	MessageType   string  `json:"message_type"`
-	FilesRestored *uint64 `json:"files_restored"`
-	TotalFiles    *uint64 `json:"total_files"`
-	BytesRestored *uint64 `json:"bytes_restored"`
-	TotalBytes    *uint64 `json:"total_bytes"`
+	MessageType   string         `json:"message_type"`
+	FilesRestored restoreCounter `json:"files_restored"`
+	TotalFiles    restoreCounter `json:"total_files"`
+	BytesRestored restoreCounter `json:"bytes_restored"`
+	TotalBytes    restoreCounter `json:"total_bytes"`
+}
+
+// restoreCounter accepts an omitted field as restic's documented zero value,
+// while rejecting an explicit null or any non-uint64 representation.
+type restoreCounter uint64
+
+func (counter *restoreCounter) UnmarshalJSON(data []byte) error {
+	if bytes.Equal(bytes.TrimSpace(data), []byte("null")) {
+		return errors.New("restore counter must not be null")
+	}
+	var value uint64
+	if err := json.Unmarshal(data, &value); err != nil {
+		return err
+	}
+	*counter = restoreCounter(value)
+	return nil
 }
 
 // Acquire restores one full snapshot into a private staging child, then
@@ -608,7 +624,7 @@ func (adapter *Adapter) runRestore(
 			}
 		case "summary":
 			var summary restoreSummary
-			if err := json.Unmarshal(raw, &summary); err != nil || summary.FilesRestored == nil || summary.TotalFiles == nil || summary.BytesRestored == nil || summary.TotalBytes == nil || *summary.FilesRestored > *summary.TotalFiles || *summary.BytesRestored > *summary.TotalBytes {
+			if err := json.Unmarshal(raw, &summary); err != nil || summary.FilesRestored > summary.TotalFiles || summary.BytesRestored > summary.TotalBytes {
 				cancel()
 				_ = command.Wait()
 				if ctx.Err() != nil {
@@ -620,10 +636,10 @@ func (adapter *Adapter) runRestore(
 			if report != nil && lastPercent < 1 {
 				report(source.Progress{
 					PercentDone: 1,
-					FilesDone:   *summary.FilesRestored,
-					TotalFiles:  *summary.TotalFiles,
-					BytesDone:   *summary.BytesRestored,
-					TotalBytes:  *summary.TotalBytes,
+					FilesDone:   uint64(summary.FilesRestored),
+					TotalFiles:  uint64(summary.TotalFiles),
+					BytesDone:   uint64(summary.BytesRestored),
+					TotalBytes:  uint64(summary.TotalBytes),
 				})
 			}
 		default:
