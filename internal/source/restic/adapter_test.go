@@ -1449,6 +1449,71 @@ func TestCapabilitiesRequiresStructuredResticVersionAtLeast018(t *testing.T) {
 			output:  "restic 0.19.1 compiled with go1.26.4 on darwin/arm64",
 			wantErr: "restic returned invalid version JSON",
 		},
+		{
+			name:    "alternate message type case",
+			output:  `{"Message_Type":"version","version":"0.19.1"}`,
+			wantErr: "restic returned invalid version JSON",
+		},
+		{
+			name:    "alternate version case",
+			output:  `{"message_type":"version","Version":"0.19.1"}`,
+			wantErr: "restic returned invalid version JSON",
+		},
+		{
+			name:    "case variants alongside exact keys",
+			output:  `{"message_type":"version","Message_Type":"version","version":"0.19.1","Version":"0.19.1"}`,
+			wantErr: "restic returned invalid version JSON",
+		},
+		{
+			name:    "missing message type",
+			output:  `{"version":"0.19.1"}`,
+			wantErr: "restic returned invalid version JSON",
+		},
+		{
+			name:    "missing version",
+			output:  `{"message_type":"version"}`,
+			wantErr: "restic returned invalid version JSON",
+		},
+		{
+			name:    "null message type",
+			output:  `{"message_type":null,"version":"0.19.1"}`,
+			wantErr: "restic returned invalid version JSON",
+		},
+		{
+			name:    "null version",
+			output:  `{"message_type":"version","version":null}`,
+			wantErr: "restic returned invalid version JSON",
+		},
+		{
+			name:    "wrong message type representation",
+			output:  `{"message_type":true,"version":"0.19.1"}`,
+			wantErr: "restic returned invalid version JSON",
+		},
+		{
+			name:    "wrong version representation",
+			output:  `{"message_type":"version","version":19.1}`,
+			wantErr: "restic returned invalid version JSON",
+		},
+		{
+			name:    "duplicate message type",
+			output:  `{"message_type":"version","message_type":"version","version":"0.19.1"}`,
+			wantErr: "restic returned invalid version JSON",
+		},
+		{
+			name:    "conflicting message type",
+			output:  `{"message_type":"future","message_type":"version","version":"0.19.1"}`,
+			wantErr: "restic returned invalid version JSON",
+		},
+		{
+			name:    "duplicate version",
+			output:  `{"message_type":"version","version":"0.19.1","version":"0.19.1"}`,
+			wantErr: "restic returned invalid version JSON",
+		},
+		{
+			name:    "conflicting version",
+			output:  `{"message_type":"version","version":"0.17.0","version":"0.19.1"}`,
+			wantErr: "restic returned invalid version JSON",
+		},
 	}
 
 	for _, test := range tests {
@@ -1479,6 +1544,8 @@ func TestCapabilitiesRequiresStructuredResticVersionAtLeast018(t *testing.T) {
 				if err == nil || !strings.Contains(err.Error(), test.wantErr) {
 					t.Fatalf("capabilities error = %v, want containing %q", err, test.wantErr)
 				}
+				_, listErr := adapter.ListRecoveryPoints(context.Background())
+				assertPreflightRequired(t, listErr, "list")
 				return
 			}
 			if err != nil {

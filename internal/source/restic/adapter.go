@@ -76,6 +76,7 @@ type Adapter struct {
 	preflightCalls       uint64
 	preflightBatchFailed bool
 	preflightReady       bool
+	afterGateRelease     func()
 }
 
 // New validates static adapter configuration without resolving credentials.
@@ -163,21 +164,19 @@ func validateRepository(repository Repository) error {
 	return nil
 }
 
-type versionMessage struct {
-	MessageType string `json:"message_type"`
-	Version     string `json:"version"`
-}
-
 // Capabilities preflights the executable and its structured-output contract.
 func (adapter *Adapter) Capabilities(ctx context.Context) (source.Capabilities, error) {
 	adapter.beginPreflight()
 	verified := false
 	acquired := false
 	defer func() {
-		adapter.completePreflight(verified)
 		if acquired {
 			<-adapter.preflightGate
+			if adapter.afterGateRelease != nil {
+				adapter.afterGateRelease()
+			}
 		}
+		adapter.completePreflight(verified)
 	}()
 	select {
 	case adapter.preflightGate <- struct{}{}:
@@ -189,15 +188,15 @@ func (adapter *Adapter) Capabilities(ctx context.Context) (source.Capabilities, 
 	if err != nil {
 		return source.Capabilities{}, err
 	}
-	var message versionMessage
-	if err := json.Unmarshal(stdout, &message); err != nil || message.MessageType != "version" || message.Version == "" {
+	version, err := decodeVersionMessage(stdout)
+	if err != nil {
 		return source.Capabilities{}, &source.Failure{
 			Kind:      source.FailureCorruptOutput,
 			Operation: "preflight",
 			SafeHint:  "restic returned invalid version JSON",
 		}
 	}
-	if !supportedVersion(message.Version) {
+	if !supportedVersion(version) {
 		return source.Capabilities{}, &source.Failure{
 			Kind:      source.FailureUnsupported,
 			Operation: "preflight",
@@ -206,7 +205,7 @@ func (adapter *Adapter) Capabilities(ctx context.Context) (source.Capabilities, 
 	}
 	verified = true
 	return source.Capabilities{
-		AdapterVersion:  "restic/" + message.Version,
+		AdapterVersion:  "restic/" + version,
 		Lists:           true,
 		Acquires:        true,
 		ReportsProgress: true,
@@ -237,7 +236,7 @@ func (adapter *Adapter) completePreflight(ready bool) {
 
 func (adapter *Adapter) requirePreflight(operation string) error {
 	adapter.verification.RLock()
-	ready := adapter.preflightReady
+	ready := adapter.preflightReady && adapter.preflightCalls == 0
 	adapter.verification.RUnlock()
 	if ready {
 		return nil
@@ -252,6 +251,7 @@ func supportedVersion(version string) bool {
 
 var (
 	errOutputLimit              = errors.New("process output limit exceeded")
+	errInvalidVersionMessage    = errors.New("invalid restic version message")
 	errInvalidResticMessageType = errors.New("invalid restic message_type")
 	errInvalidRestoreSummary    = errors.New("invalid restic restore summary")
 	errInvalidStructuredExit    = errors.New("invalid structured restic exit")
@@ -519,6 +519,91 @@ func removePrivateTree(path string) error {
 		return nil
 	})
 	return os.RemoveAll(path)
+}
+
+type jsonObjectMember struct {
+	name  string
+	value json.RawMessage
+}
+
+func decodeJSONObjectMembers(raw []byte) ([]jsonObjectMember, bool) {
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	token, err := decoder.Token()
+	if err != nil || token != json.Delim('{') {
+		return nil, false
+	}
+	var members []jsonObjectMember
+	for decoder.More() {
+		token, err := decoder.Token()
+		if err != nil {
+			return nil, false
+		}
+		name, ok := token.(string)
+		if !ok {
+			return nil, false
+		}
+		var value json.RawMessage
+		if err := decoder.Decode(&value); err != nil {
+			return nil, false
+		}
+		members = append(members, jsonObjectMember{name: name, value: value})
+	}
+	if token, err = decoder.Token(); err != nil || token != json.Delim('}') {
+		return nil, false
+	}
+	if decoder.Decode(&struct{}{}) != io.EOF {
+		return nil, false
+	}
+	return members, true
+}
+
+func decodeJSONString(raw json.RawMessage) (string, bool) {
+	if bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
+		return "", false
+	}
+	var value string
+	if err := json.Unmarshal(raw, &value); err != nil {
+		return "", false
+	}
+	return value, true
+}
+
+func decodeVersionMessage(raw []byte) (string, error) {
+	members, ok := decodeJSONObjectMembers(raw)
+	if !ok {
+		return "", errInvalidVersionMessage
+	}
+	var messageTypeRaw json.RawMessage
+	var versionRaw json.RawMessage
+	messageTypeCount := 0
+	versionCount := 0
+	alternateMessageType := false
+	alternateVersion := false
+	for _, member := range members {
+		switch member.name {
+		case "message_type":
+			messageTypeCount++
+			messageTypeRaw = member.value
+		case "version":
+			versionCount++
+			versionRaw = member.value
+		default:
+			alternateMessageType = alternateMessageType || strings.EqualFold(member.name, "message_type")
+			alternateVersion = alternateVersion || strings.EqualFold(member.name, "version")
+		}
+	}
+	if messageTypeCount != 1 || versionCount != 1 || alternateMessageType || alternateVersion {
+		return "", errInvalidVersionMessage
+	}
+	messageType, ok := decodeJSONString(messageTypeRaw)
+	if !ok || messageType != "version" {
+		return "", errInvalidVersionMessage
+	}
+	version, ok := decodeJSONString(versionRaw)
+	if !ok || version == "" {
+		return "", errInvalidVersionMessage
+	}
+	return version, nil
 }
 
 func decodeResticMessageType(raw json.RawMessage) (string, error) {
@@ -833,10 +918,8 @@ func validateStructuredExit(stderr []byte, exitCode int) error {
 }
 
 func decodeStructuredExitObject(raw json.RawMessage) (string, json.Number, bool, error) {
-	decoder := json.NewDecoder(bytes.NewReader(raw))
-	decoder.UseNumber()
-	token, err := decoder.Token()
-	if err != nil || token != json.Delim('{') {
+	members, ok := decodeJSONObjectMembers(raw)
+	if !ok {
 		return "", "", false, errInvalidStructuredExit
 	}
 	var messageTypeRaw json.RawMessage
@@ -845,42 +928,24 @@ func decodeStructuredExitObject(raw json.RawMessage) (string, json.Number, bool,
 	codeCount := 0
 	alternateMessageType := false
 	alternateCode := false
-	for decoder.More() {
-		token, err := decoder.Token()
-		if err != nil {
-			return "", "", false, errInvalidStructuredExit
-		}
-		key, ok := token.(string)
-		if !ok {
-			return "", "", false, errInvalidStructuredExit
-		}
-		var value json.RawMessage
-		if err := decoder.Decode(&value); err != nil {
-			return "", "", false, errInvalidStructuredExit
-		}
-		switch key {
+	for _, member := range members {
+		switch member.name {
 		case "message_type":
 			messageTypeCount++
-			messageTypeRaw = value
+			messageTypeRaw = member.value
 		case "code":
 			codeCount++
-			codeRaw = value
+			codeRaw = member.value
 		default:
-			alternateMessageType = alternateMessageType || strings.EqualFold(key, "message_type")
-			alternateCode = alternateCode || strings.EqualFold(key, "code")
+			alternateMessageType = alternateMessageType || strings.EqualFold(member.name, "message_type")
+			alternateCode = alternateCode || strings.EqualFold(member.name, "code")
 		}
 	}
-	if token, err = decoder.Token(); err != nil || token != json.Delim('}') {
+	if messageTypeCount != 1 || alternateMessageType {
 		return "", "", false, errInvalidStructuredExit
 	}
-	if decoder.Decode(&struct{}{}) != io.EOF || messageTypeCount != 1 || alternateMessageType {
-		return "", "", false, errInvalidStructuredExit
-	}
-	var messageType string
-	if bytes.Equal(bytes.TrimSpace(messageTypeRaw), []byte("null")) {
-		return "", "", false, errInvalidStructuredExit
-	}
-	if err := json.Unmarshal(messageTypeRaw, &messageType); err != nil {
+	messageType, ok := decodeJSONString(messageTypeRaw)
+	if !ok {
 		return "", "", false, errInvalidStructuredExit
 	}
 	if messageType != "exit_error" {

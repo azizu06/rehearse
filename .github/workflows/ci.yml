@@ -90,6 +90,7 @@ jobs:
       - run: make test-adapters-race
       - name: Fuzz hostile restic JSON boundaries
         run: |
+          go test ./internal/source/restic -run '^$' -fuzz '^FuzzDecodeVersionMessage$' -fuzztime=5s -parallel=4
           go test ./internal/source/restic -run '^$' -fuzz '^FuzzDecodeResticMessageType$' -fuzztime=5s -parallel=4
           go test ./internal/source/restic -run '^$' -fuzz '^FuzzDecodeRestoreSummary$' -fuzztime=5s -parallel=4
           go test ./internal/source/restic -run '^$' -fuzz '^FuzzValidateStructuredExit$' -fuzztime=5s -parallel=4

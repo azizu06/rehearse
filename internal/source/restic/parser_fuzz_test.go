@@ -11,6 +11,79 @@ import (
 
 const fuzzPrivateMarker = "private-fuzz-marker"
 
+func FuzzDecodeVersionMessage(f *testing.F) {
+	f.Add([]byte(`{"message_type":"version","version":"0.19.1","future":{"safe":true}}`))
+	f.Add([]byte(`{"Message_Type":"version","version":"0.19.1"}`))
+	f.Add([]byte(`{"message_type":"version","Version":"0.19.1"}`))
+	f.Add([]byte(`{"message_type":"version","message_type":"future","version":"0.19.1"}`))
+	f.Add([]byte(`{"message_type":"version","version":"0.17.0","version":"0.19.1"}`))
+	f.Add([]byte(`{"message_type":"version","version":null}`))
+
+	f.Fuzz(func(t *testing.T, data []byte) {
+		version, err := decodeVersionMessage(data)
+		if err != nil {
+			if !errors.Is(err, errInvalidVersionMessage) {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if strings.Contains(err.Error(), fuzzPrivateMarker) {
+				t.Fatalf("private marker leaked through error: %v", err)
+			}
+			return
+		}
+		if !independentlyValidVersionMessage(data, version) {
+			t.Fatalf("version parser accepted input rejected by independent JSON oracle: %q", data)
+		}
+	})
+}
+
+func independentlyValidVersionMessage(data []byte, wantVersion string) bool {
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	token, err := decoder.Token()
+	if err != nil || token != json.Delim('{') {
+		return false
+	}
+	messageTypeCount := 0
+	versionCount := 0
+	alternateMessageType := false
+	alternateVersion := false
+	var messageType any
+	var version any
+	for decoder.More() {
+		token, err := decoder.Token()
+		if err != nil {
+			return false
+		}
+		name, ok := token.(string)
+		if !ok {
+			return false
+		}
+		var value any
+		if err := decoder.Decode(&value); err != nil {
+			return false
+		}
+		switch name {
+		case "message_type":
+			messageTypeCount++
+			messageType = value
+		case "version":
+			versionCount++
+			version = value
+		default:
+			alternateMessageType = alternateMessageType || strings.EqualFold(name, "message_type")
+			alternateVersion = alternateVersion || strings.EqualFold(name, "version")
+		}
+	}
+	if token, err = decoder.Token(); err != nil || token != json.Delim('}') {
+		return false
+	}
+	if decoder.Decode(&struct{}{}) != io.EOF || messageTypeCount != 1 || versionCount != 1 || alternateMessageType || alternateVersion {
+		return false
+	}
+	messageTypeString, messageTypeOK := messageType.(string)
+	versionString, versionOK := version.(string)
+	return messageTypeOK && versionOK && messageTypeString == "version" && versionString != "" && versionString == wantVersion
+}
+
 func FuzzDecodeResticMessageType(f *testing.F) {
 	f.Add([]byte(`{"message_type":"future_message","private":"` + fuzzPrivateMarker + `"}`))
 	f.Add([]byte(`{"message_type":"summary"}`))
