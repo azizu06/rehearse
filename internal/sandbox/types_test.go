@@ -55,6 +55,7 @@ func TestRequestValidationRejectsInvalidBounds(t *testing.T) {
 		{name: "unsafe run ID", mutate: func(request *Request) { request.RunID = "run/id" }},
 		{name: "missing Compose file", mutate: func(request *Request) { request.ComposeFiles = nil }},
 		{name: "zero CPU", mutate: func(request *Request) { request.Limits.CPUs = "0" }},
+		{name: "sub-nano CPU", mutate: func(request *Request) { request.Limits.CPUs = "0.0000000009" }},
 		{name: "small memory", mutate: func(request *Request) { request.Limits.MemoryBytes = 1 }},
 		{name: "zero PIDs", mutate: func(request *Request) { request.Limits.PIDs = 0 }},
 		{name: "zero duration", mutate: func(request *Request) { request.Limits.Duration = 0 }},
@@ -68,5 +69,20 @@ func TestRequestValidationRejectsInvalidBounds(t *testing.T) {
 				t.Fatalf("normalizeRequest error = %v, want ErrInvalidRequest", err)
 			}
 		})
+	}
+}
+
+func TestRequestValidationAcceptsMinimumCPUQuota(t *testing.T) {
+	request := Request{
+		RunID:        "run-minimum-cpu",
+		ComposeFiles: []string{"testdata/compose.yaml"},
+		Limits: Limits{
+			CPUs: "0.000000001", MemoryBytes: 32 << 20, PIDs: 32,
+			Duration: time.Minute, OutputBytes: 4096,
+		},
+	}
+
+	if _, err := normalizeRequest(request); err != nil {
+		t.Fatalf("normalizeRequest: %v", err)
 	}
 }

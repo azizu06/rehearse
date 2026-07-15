@@ -30,6 +30,7 @@ const (
 	resourceGenerationLabel = "dev.rehearse.resource-generation"
 	sandboxClaimBytes       = 32
 	maxComposeKeyLength     = sandboxid.MaxResourceKeyLength
+	minimumCPUs             = 1e-9
 )
 
 var (
@@ -223,8 +224,8 @@ func normalizeRequest(request Request) (normalizedRequest, error) {
 func (limits Limits) validate() error {
 	cpus, err := strconv.ParseFloat(limits.CPUs, 64)
 	switch {
-	case err != nil || math.IsNaN(cpus) || math.IsInf(cpus, 0) || cpus <= 0 || cpus > 64:
-		return fmt.Errorf("%w: CPUs must be greater than zero and at most 64", ErrInvalidRequest)
+	case err != nil || math.IsNaN(cpus) || math.IsInf(cpus, 0) || cpus < minimumCPUs || cpus > 64:
+		return fmt.Errorf("%w: CPUs must be at least 0.000000001 and at most 64", ErrInvalidRequest)
 	case limits.MemoryBytes < 16<<20 || limits.MemoryBytes > 1<<40:
 		return fmt.Errorf("%w: memory must be between 16 MiB and 1 TiB", ErrInvalidRequest)
 	case limits.PIDs < 1 || limits.PIDs > 32768:
