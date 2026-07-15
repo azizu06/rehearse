@@ -107,7 +107,7 @@ func resourceDescriptor(kind, name string) resolvedResourceName {
 	default:
 		return resolvedResourceName{
 			kind: kind, name: name,
-			inspectFormat: `{"id":{{json .CreatedAt}},"name":{{json .Name}},"labels":{{json .Labels}}}`,
+			inspectFormat: `{"id":"","name":{{json .Name}},"labels":{{json .Labels}}}`,
 		}
 	}
 }

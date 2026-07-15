@@ -54,9 +54,10 @@ rewrites and revalidates the snapshot before `up` receives only those bytes.
 The runner also checks every exact generated container, network, and volume
 name without ownership filters and refuses to adopt any existing object. While
 holding the project lock, it then atomically creates every generated network and
-named volume with the exact managed, project, run ID, full-fingerprint, and
-invocation-specific sandbox-claim labels and immediately verifies their names,
-daemon identities, and labels. The final revalidated snapshot
+named volume with the exact managed, project, run ID, full-fingerprint,
+invocation-specific sandbox-claim, and per-resource generation labels and
+immediately verifies their names, daemon identities where Docker exposes them,
+and labels. The final revalidated snapshot
 references only those exact pre-created resources as external name-only
 references, so Compose cannot adopt a late unrelated name collision. Containers
 do not start unless every reservation verifies.
@@ -65,14 +66,19 @@ live in a deterministic Rehearse-owned 0700 directory as 0600 files, are never
 included in command errors, and are removed by both normal cleanup and startup
 reconciliation after a process crash.
 
-Before any Docker creation, the runner durably records a cryptographically random
-sandbox claim ID; the identifier is not secret. Stable run labels remain
-attribution metadata and are never
-sufficient deletion authority. Live cleanup keeps an invocation-local ledger
-containing only successfully created and immediately verified resource type,
-name, daemon identity, and full labels. It deletes only ledgered resources whose
-current daemon identity and full labels still match. Startup cleanup selects only
-resources matching the durable active claim ID and every stable run label.
+Before any Docker creation, the runner durably records a cryptographically
+random sandbox claim ID; the identifier is not secret. Before each individual
+creation, it also durably appends the expected resource type, exact name, and a
+cryptographically random generation ID to that claim's manifest. The generation
+is included in the resource labels. Stable run labels remain attribution
+metadata and are never sufficient deletion authority. Live cleanup keeps an
+invocation-local ledger containing only successfully created and immediately
+verified resource type, name, daemon identity where available, and full labels.
+It deletes only ledgered resources whose current identity and full labels still
+match. Startup cleanup uses the durable manifest and deletes only the exact name
+carrying the active claim, expected generation, and every stable run label. If
+the process exits after manifest append but before creation, no resource
+matches. If it exits after creation, the manifest authorizes reconciliation.
 Existing or late-colliding resources are never adopted or deleted, even when
 they reproduce every stable label. A Docker-daemon administrator remains inside
 the trusted local boundary and can subvert Docker resource metadata.
@@ -95,6 +101,10 @@ stays out of the janitor queue; restart reconciliation activates it after
 process death, while a failed claim enters the queue immediately. Successful
 cleanup closes the claim without permitting a second sandbox lifecycle for
 that run.
+An active or failed claim with a missing or malformed claim ID or manifest entry
+is corrupt ownership state. Reconciliation records `cleanup_failed`, performs no
+Docker operation for that run, reports that manual intervention is required,
+and leaves the run queued for retry.
 `cleanup_failed` remains queued; `BeginCleanupRetry` moves only cleanup back to
 pending and appends immutable reconciliation evidence. Only
 `cleanup_succeeded` clears reconciliation ownership.

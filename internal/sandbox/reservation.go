@@ -7,28 +7,47 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"time"
+
+	"github.com/azizu06/rehearse/internal/drill"
 )
 
 type createdResource struct {
-	kind     string
-	name     string
-	daemonID string
+	kind       string
+	name       string
+	daemonID   string
+	generation string
 }
 
 type createdResourceLedger struct {
 	resources map[string]createdResource
+	expected  map[string]drill.SandboxResourceClaim
 }
 
 func newCreatedResourceLedger() *createdResourceLedger {
-	return &createdResourceLedger{resources: make(map[string]createdResource)}
+	return &createdResourceLedger{
+		resources: make(map[string]createdResource),
+		expected:  make(map[string]drill.SandboxResourceClaim),
+	}
+}
+
+func resourceKey(kind, name string) string { return kind + "\x00" + name }
+
+func (ledger *createdResourceLedger) expect(resource drill.SandboxResourceClaim) {
+	ledger.expected[resourceKey(resource.Kind, resource.Name)] = resource
 }
 
 func (ledger *createdResourceLedger) add(resource createdResource) {
-	ledger.resources[resource.kind+"\x00"+resource.name] = resource
+	ledger.resources[resourceKey(resource.kind, resource.name)] = resource
 }
 
 func (ledger *createdResourceLedger) get(kind, name string) (createdResource, bool) {
-	resource, exists := ledger.resources[kind+"\x00"+name]
+	resource, exists := ledger.resources[resourceKey(kind, name)]
+	return resource, exists
+}
+
+func (ledger *createdResourceLedger) expectedResource(kind, name string) (drill.SandboxResourceClaim, bool) {
+	resource, exists := ledger.expected[resourceKey(kind, name)]
 	return resource, exists
 }
 
@@ -53,10 +72,31 @@ type inspectedResource struct {
 	Labels   map[string]string `json:"labels"`
 }
 
-func reserveComposeResources(ctx context.Context, command dockerCommand, identity identity, model composeModel, ledger *createdResourceLedger) error {
+func reserveComposeResources(
+	ctx context.Context,
+	command dockerCommand,
+	journal CleanupJournal,
+	identity identity,
+	model composeModel,
+	ledger *createdResourceLedger,
+	newGeneration func() (string, error),
+) error {
 	for _, resource := range resolvedResourceNames(identity, model) {
 		if resource.kind != "network" && resource.kind != "volume" {
 			continue
+		}
+		generation, err := newGeneration()
+		if err != nil {
+			return err
+		}
+		expected := drill.SandboxResourceClaim{Kind: resource.kind, Name: resource.name, Generation: generation}
+		if err := journal.AppendSandboxCleanupResource(ctx, identity.runID, identity.claimID, expected, time.Now().UTC()); err != nil {
+			return fmt.Errorf("record expected Compose %s %q: %w", resource.kind, resource.name, err)
+		}
+		ledger.expect(expected)
+		labels, err := resourceLabels(identity, generation)
+		if err != nil {
+			return err
 		}
 		args := []string{resource.kind, "create"}
 		if resource.kind == "network" {
@@ -64,31 +104,33 @@ func reserveComposeResources(ctx context.Context, command dockerCommand, identit
 		} else {
 			args = append(args, "--driver", "local")
 		}
-		for _, label := range sortedOwnershipLabels(identity) {
+		for _, label := range sortedLabels(labels) {
 			args = append(args, "--label", label)
 		}
 		args = append(args, resource.name)
 		if _, err := command.run(ctx, dockerMetadataOutputLimit, args...); err != nil {
-			return classifyReservationFailure(ctx, command, identity, resource, err)
+			return classifyReservationFailure(ctx, command, resource, labels, err)
 		}
 		inspected, err := inspectResource(ctx, command, resource)
 		if err != nil {
 			return fmt.Errorf("verify reserved Compose %s %q: %w", resource.kind, resource.name, err)
 		}
-		if !labelsContain(inspected.Labels, identity.labels()) {
+		if !labelsContain(inspected.Labels, labels) {
 			return ErrProjectCollision
 		}
-		ledger.add(createdResource{kind: resource.kind, name: resource.name, daemonID: inspected.DaemonID})
+		ledger.add(createdResource{
+			kind: resource.kind, name: resource.name, daemonID: inspected.DaemonID, generation: generation,
+		})
 	}
 	return nil
 }
 
-func classifyReservationFailure(ctx context.Context, command dockerCommand, identity identity, resource resolvedResourceName, createErr error) error {
+func classifyReservationFailure(ctx context.Context, command dockerCommand, resource resolvedResourceName, labels map[string]string, createErr error) error {
 	inspected, inspectErr := inspectResource(ctx, command, resource)
 	if inspectErr != nil {
 		return fmt.Errorf("reserve Compose %s %q: %w", resource.kind, resource.name, createErr)
 	}
-	if !labelsContain(inspected.Labels, identity.labels()) {
+	if !labelsContain(inspected.Labels, labels) {
 		return errors.Join(ErrProjectCollision, createErr)
 	}
 	return errors.Join(ErrProjectExists, createErr)
@@ -119,7 +161,7 @@ func inspectResourceReference(ctx context.Context, command dockerCommand, kind, 
 	if kind == "container" {
 		inspected.Name = strings.TrimPrefix(inspected.Name, "/")
 	}
-	if inspected.Name == "" || inspected.DaemonID == "" {
+	if inspected.Name == "" || (kind != "volume" && inspected.DaemonID == "") {
 		return inspectedResource{}, ErrProjectCollision
 	}
 	return inspected, nil
@@ -144,16 +186,25 @@ func captureComposeContainers(ctx context.Context, command dockerCommand, identi
 		if err != nil {
 			return fmt.Errorf("verify started Compose container %q: %w", resource.name, err)
 		}
-		if !labelsContain(inspected.Labels, identity.labels()) {
+		expected, exists := ledger.expectedResource(resource.kind, resource.name)
+		if !exists {
 			return ErrProjectCollision
 		}
-		ledger.add(createdResource{kind: resource.kind, name: resource.name, daemonID: inspected.DaemonID})
+		labels, err := resourceLabels(identity, expected.Generation)
+		if err != nil {
+			return err
+		}
+		if !labelsContain(inspected.Labels, labels) {
+			return ErrProjectCollision
+		}
+		ledger.add(createdResource{
+			kind: resource.kind, name: resource.name, daemonID: inspected.DaemonID, generation: expected.Generation,
+		})
 	}
 	return nil
 }
 
-func sortedOwnershipLabels(identity identity) []string {
-	labels := identity.labels()
+func sortedLabels(labels map[string]string) []string {
 	keys := make([]string, 0, len(labels))
 	for key := range labels {
 		keys = append(keys, key)
@@ -164,6 +215,72 @@ func sortedOwnershipLabels(identity identity) []string {
 		result = append(result, key+"="+labels[key])
 	}
 	return result
+}
+
+func prepareComposeContainerClaims(
+	ctx context.Context,
+	journal CleanupJournal,
+	identity identity,
+	data []byte,
+	model composeModel,
+	ledger *createdResourceLedger,
+	newGeneration func() (string, error),
+) ([]byte, error) {
+	serviceNames := make([]string, 0, len(model.Services))
+	for name := range model.Services {
+		serviceNames = append(serviceNames, name)
+	}
+	sort.Strings(serviceNames)
+	generations := make(map[string]string, len(serviceNames))
+	for _, serviceName := range serviceNames {
+		resource := resourceDescriptor("container", identity.projectName+"-"+serviceName+"-1")
+		generation, err := newGeneration()
+		if err != nil {
+			return nil, err
+		}
+		expected := drill.SandboxResourceClaim{Kind: resource.kind, Name: resource.name, Generation: generation}
+		if err := journal.AppendSandboxCleanupResource(ctx, identity.runID, identity.claimID, expected, time.Now().UTC()); err != nil {
+			return nil, fmt.Errorf("record expected Compose container %q: %w", resource.name, err)
+		}
+		ledger.expect(expected)
+		generations[serviceName] = generation
+	}
+
+	return applyComposeContainerGenerations(data, generations)
+}
+
+func applyComposeContainerGenerations(data []byte, generations map[string]string) ([]byte, error) {
+	var document map[string]json.RawMessage
+	if err := json.Unmarshal(data, &document); err != nil {
+		return nil, fmt.Errorf("decode reserved Compose snapshot for container claims: %w", err)
+	}
+	var services map[string]json.RawMessage
+	if err := json.Unmarshal(document["services"], &services); err != nil {
+		return nil, fmt.Errorf("decode reserved Compose services for container claims: %w", err)
+	}
+	for name, raw := range services {
+		generation, exists := generations[name]
+		if !exists {
+			return nil, fmt.Errorf("missing reserved Compose service %q generation", name)
+		}
+		var service map[string]json.RawMessage
+		if err := json.Unmarshal(raw, &service); err != nil {
+			return nil, fmt.Errorf("decode reserved Compose service %q: %w", name, err)
+		}
+		var labels map[string]string
+		if err := json.Unmarshal(service["labels"], &labels); err != nil {
+			return nil, fmt.Errorf("decode reserved Compose service %q labels: %w", name, err)
+		}
+		labels[resourceGenerationLabel] = generation
+		service["labels"], _ = json.Marshal(labels)
+		services[name], _ = json.Marshal(service)
+	}
+	document["services"], _ = json.Marshal(services)
+	result, err := json.Marshal(document)
+	if err != nil {
+		return nil, fmt.Errorf("encode reserved Compose container claims: %w", err)
+	}
+	return result, nil
 }
 
 func rewriteSnapshotReservedResources(data []byte, identity identity, model composeModel) ([]byte, error) {

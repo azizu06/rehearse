@@ -97,7 +97,7 @@ type sequencedCleaner struct {
 	errors []error
 }
 
-func (cleaner *sequencedCleaner) Cleanup(context.Context, string, string) error {
+func (cleaner *sequencedCleaner) Cleanup(context.Context, string, string, []drill.SandboxResourceClaim) error {
 	if len(cleaner.errors) == 0 {
 		return nil
 	}

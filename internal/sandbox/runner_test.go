@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -24,6 +25,8 @@ func TestRunnerUsesShellFreeNoBuildNoPullAndFreshCleanupContext(t *testing.T) {
 		journal:       &recordingCleanupJournal{},
 		locker:        newProjectLocker(t.TempDir()),
 		temporaryRoot: t.TempDir(), cleanupTimeout: time.Second,
+		newClaimID:      func() (string, error) { return testClaimID, nil },
+		newGenerationID: testGenerationGenerator(),
 	}
 	request := Request{
 		RunID: "run-cancel", ComposeFiles: []string{"testdata/compose.yaml"},
@@ -140,7 +143,7 @@ func (docker *runnerDocker) run(ctx context.Context, _ int64, args ...string) ([
 			docker.collisionVisible = true
 			collisionLabels := make(map[string]string, len(labels)-1)
 			for key, value := range labels {
-				if key != sandboxClaimLabel {
+				if key != sandboxClaimLabel && key != resourceGenerationLabel {
 					collisionLabels[key] = value
 				}
 			}
@@ -162,7 +165,11 @@ func (docker *runnerDocker) run(ctx context.Context, _ int64, args ...string) ([
 	if len(args) >= 2 && (args[0] == "network" || args[0] == "volume") && args[1] == "ls" && strings.Contains(strings.Join(args, " "), "name=^") {
 		for key, resource := range docker.resources {
 			if strings.HasPrefix(key, args[0]+"\x00") && strings.Contains(strings.Join(args, " "), "name=^"+resource.Name+"$") {
-				return []byte(resource.DaemonID + "\n"), nil
+				reference := resource.DaemonID
+				if args[0] == "volume" {
+					reference = resource.Name
+				}
+				return []byte(reference + "\n"), nil
 			}
 		}
 		return nil, nil
@@ -325,7 +332,8 @@ func argumentAfter(values []string, key string) string {
 
 func TestRunnerAtomicallyReservesGeneratedResourcesBeforeComposeUp(t *testing.T) {
 	command := &runnerDocker{includeVolume: true}
-	runner := testRunner(t, command, &recordingCleanupJournal{})
+	journal := &recordingCleanupJournal{}
+	runner := testRunner(t, command, journal)
 	request := testRunnerRequest("run-reserved-resources", time.Minute)
 	if _, err := runner.Run(context.Background(), request, func(context.Context, Instance) error { return nil }); err != nil {
 		t.Fatalf("Run: %v", err)
@@ -341,6 +349,16 @@ func TestRunnerAtomicallyReservesGeneratedResourcesBeforeComposeUp(t *testing.T)
 	}
 	if !command.upReservedNetwork || !command.upReservedVolume {
 		t.Fatalf("Compose up snapshot did not use only reserved external resources: network=%t volume=%t", command.upReservedNetwork, command.upReservedVolume)
+	}
+	if len(journal.resources) != 3 {
+		t.Fatalf("durable cleanup manifest = %#v, want network, volume, and container", journal.resources)
+	}
+	seenGenerations := make(map[string]bool)
+	for _, resource := range journal.resources {
+		if len(resource.Generation) != 64 || seenGenerations[resource.Generation] {
+			t.Fatalf("invalid or reused resource generation in manifest: %#v", journal.resources)
+		}
+		seenGenerations[resource.Generation] = true
 	}
 }
 
@@ -391,7 +409,8 @@ func TestRunnerPreservesPreExistingExactStableLabelResource(t *testing.T) {
 		cleaner: cleaner{command: command, waiter: &recordingWaiter{}, quiescence: cleanupQuiescence, snapshotRoot: root},
 		journal: &recordingCleanupJournal{}, locker: newProjectLocker(filepath.Join(root, "locks")),
 		temporaryRoot: root, cleanupTimeout: time.Second,
-		newClaimID: func() (string, error) { return testClaimID, nil },
+		newClaimID:      func() (string, error) { return testClaimID, nil },
+		newGenerationID: testGenerationGenerator(),
 	}
 	_, err := runner.Run(context.Background(), request, func(context.Context, Instance) error {
 		t.Fatal("callback ran after a pre-existing collision")
@@ -428,7 +447,8 @@ func (docker *stableCollisionDocker) run(_ context.Context, _ int64, args ...str
 
 func TestRunnerRejectsReservationWhoseImmediateOwnershipVerificationMismatches(t *testing.T) {
 	command := &runnerDocker{includeVolume: true, reservationMismatch: "network"}
-	runner := testRunner(t, command, &recordingCleanupJournal{})
+	journal := &recordingCleanupJournal{}
+	runner := testRunner(t, command, journal)
 	_, err := runner.Run(context.Background(), testRunnerRequest("run-reservation-verification", time.Minute), func(context.Context, Instance) error {
 		t.Fatal("callback ran after reservation ownership mismatch")
 		return nil
@@ -438,6 +458,19 @@ func TestRunnerRejectsReservationWhoseImmediateOwnershipVerificationMismatches(t
 	}
 	if command.upCall != nil {
 		t.Fatal("runner started containers before every reservation verified")
+	}
+	if len(command.resources) != 1 {
+		t.Fatalf("live cleanup touched unverified post-create resource: %#v", command.resources)
+	}
+	command.reservationMismatch = ""
+	identity, _ := newIdentity("run-reservation-verification")
+	identity, _ = identity.withClaimID(testClaimID)
+	startupCleaner := cleaner{command: command, waiter: &recordingWaiter{}, quiescence: cleanupQuiescence}
+	if err := startupCleaner.cleanupManifest(context.Background(), identity, journal.resources); err != nil {
+		t.Fatalf("startup cleanup after post-create crash window: %v", err)
+	}
+	if len(command.resources) != 0 {
+		t.Fatalf("startup cleanup left durable post-create resource: %#v", command.resources)
 	}
 }
 
@@ -507,6 +540,8 @@ func TestRunnerRemovesSnapshotAndCleansAfterStartBoundaryErrors(t *testing.T) {
 				cleaner: cleaner{command: command, waiter: &recordingWaiter{}, quiescence: cleanupQuiescence, snapshotRoot: root},
 				journal: &recordingCleanupJournal{},
 				locker:  newProjectLocker(filepath.Join(root, "locks")), temporaryRoot: root, cleanupTimeout: time.Second,
+				newClaimID:      func() (string, error) { return testClaimID, nil },
+				newGenerationID: testGenerationGenerator(),
 			}
 			request := Request{
 				RunID: "run-" + strings.ReplaceAll(test.name, " ", "-"), ComposeFiles: []string{"testdata/compose.yaml"},
@@ -584,6 +619,8 @@ func TestRunnerDurablyRecordsSnapshotDeletionFailure(t *testing.T) {
 		},
 		journal: journal, locker: newProjectLocker(filepath.Join(root, "locks")),
 		temporaryRoot: root, cleanupTimeout: time.Second,
+		newClaimID:      func() (string, error) { return testClaimID, nil },
+		newGenerationID: testGenerationGenerator(),
 	}
 	_, err := runner.Run(context.Background(), testRunnerRequest("run-snapshot-delete", time.Minute), func(context.Context, Instance) error { return nil })
 	if !errors.Is(err, wantErr) {
@@ -615,7 +652,8 @@ func testRunner(t *testing.T, command *runnerDocker, journal CleanupJournal) *Do
 		cleaner: cleaner{command: command, waiter: &recordingWaiter{}, quiescence: cleanupQuiescence, snapshotRoot: root},
 		journal: journal, locker: newProjectLocker(filepath.Join(root, "locks")),
 		temporaryRoot: root, cleanupTimeout: time.Second,
-		newClaimID: func() (string, error) { return testClaimID, nil },
+		newClaimID:      func() (string, error) { return testClaimID, nil },
+		newGenerationID: testGenerationGenerator(),
 	}
 }
 
@@ -627,15 +665,36 @@ func testRunnerRequest(runID string, duration time.Duration) Request {
 }
 
 type recordingCleanupJournal struct {
-	mu       sync.Mutex
-	claimErr error
-	claimID  string
-	statuses []drill.CleanupStatus
+	mu        sync.Mutex
+	claimErr  error
+	claimID   string
+	resources []drill.SandboxResourceClaim
+	statuses  []drill.CleanupStatus
+}
+
+func (journal *recordingCleanupJournal) AppendSandboxCleanupResource(
+	_ context.Context,
+	_, _ string,
+	resource drill.SandboxResourceClaim,
+	_ time.Time,
+) error {
+	journal.mu.Lock()
+	defer journal.mu.Unlock()
+	journal.resources = append(journal.resources, resource)
+	return nil
 }
 
 func (journal *recordingCleanupJournal) ClaimSandboxCleanup(_ context.Context, _, claimID string, _ time.Time) error {
 	journal.claimID = claimID
 	return journal.claimErr
+}
+
+func testGenerationGenerator() func() (string, error) {
+	index := 0
+	return func() (string, error) {
+		index++
+		return fmt.Sprintf("%064x", index), nil
+	}
 }
 
 func (journal *recordingCleanupJournal) RecordSandboxCleanup(_ context.Context, _ string, status drill.CleanupStatus, _ time.Time) error {

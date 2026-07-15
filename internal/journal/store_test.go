@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -16,6 +17,7 @@ import (
 
 	"github.com/azizu06/rehearse/internal/drill"
 	"github.com/azizu06/rehearse/internal/journal"
+	"github.com/azizu06/rehearse/internal/sandbox"
 )
 
 const testSandboxClaimID = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
@@ -357,9 +359,28 @@ func TestSandboxCleanupClaimRequiresOneDurableRunAndQueuesFailures(t *testing.T)
 	if err := store.ClaimSandboxCleanup(ctx, run.ID, testSandboxClaimID, now.Add(time.Second)); err != nil {
 		t.Fatalf("ClaimSandboxCleanup: %v", err)
 	}
-	claimID, active, err := store.SandboxCleanupClaim(ctx, run.ID)
+	claimID, resources, active, err := store.SandboxCleanupClaim(ctx, run.ID)
 	if err != nil || !active || claimID != testSandboxClaimID {
 		t.Fatalf("SandboxCleanupClaim = %q active=%t error=%v", claimID, active, err)
+	}
+	if len(resources) != 0 {
+		t.Fatalf("initial sandbox cleanup manifest = %#v, want empty", resources)
+	}
+	resource := drill.SandboxResourceClaim{Kind: "volume", Name: "rehearse-work", Generation: strings.Repeat("c", 64)}
+	if err := store.AppendSandboxCleanupResource(ctx, run.ID, testSandboxClaimID, resource, now.Add(2*time.Second)); err != nil {
+		t.Fatalf("AppendSandboxCleanupResource: %v", err)
+	}
+	if err := store.AppendSandboxCleanupResource(ctx, run.ID, testSandboxClaimID, resource, now.Add(2*time.Second)); !errors.Is(err, journal.ErrSandboxResourceClaimed) {
+		t.Fatalf("duplicate AppendSandboxCleanupResource error = %v, want ErrSandboxResourceClaimed", err)
+	}
+	invalidResource := resource
+	invalidResource.Generation = "not-a-generation"
+	if err := store.AppendSandboxCleanupResource(ctx, run.ID, testSandboxClaimID, invalidResource, now.Add(2*time.Second)); !errors.Is(err, drill.ErrInvalidRun) {
+		t.Fatalf("invalid AppendSandboxCleanupResource error = %v, want ErrInvalidRun", err)
+	}
+	claimID, resources, active, err = store.SandboxCleanupClaim(ctx, run.ID)
+	if err != nil || !active || claimID != testSandboxClaimID || !reflect.DeepEqual(resources, []drill.SandboxResourceClaim{resource}) {
+		t.Fatalf("SandboxCleanupClaim with manifest = %q %#v active=%t error=%v", claimID, resources, active, err)
 	}
 	if err := store.ClaimSandboxCleanup(ctx, run.ID, strings.Repeat("a", 64), now.Add(2*time.Second)); !errors.Is(err, journal.ErrSandboxClaimed) {
 		t.Fatalf("second ClaimSandboxCleanup error = %v, want ErrSandboxClaimed", err)
@@ -378,7 +399,7 @@ func TestSandboxCleanupClaimRequiresOneDurableRunAndQueuesFailures(t *testing.T)
 	if err := store.RecordSandboxCleanup(ctx, run.ID, drill.CleanupSucceeded, now.Add(4*time.Second)); err != nil {
 		t.Fatalf("RecordSandboxCleanup(succeeded): %v", err)
 	}
-	if claimID, active, err := store.SandboxCleanupClaim(ctx, run.ID); err != nil || active || claimID != "" {
+	if claimID, resources, active, err := store.SandboxCleanupClaim(ctx, run.ID); err != nil || active || claimID != "" || len(resources) != 0 {
 		t.Fatalf("completed SandboxCleanupClaim = %q active=%t error=%v", claimID, active, err)
 	}
 	queued, err = store.RunsNeedingReconciliation(ctx)
@@ -388,6 +409,88 @@ func TestSandboxCleanupClaimRequiresOneDurableRunAndQueuesFailures(t *testing.T)
 	if err := store.ClaimSandboxCleanup(ctx, run.ID, strings.Repeat("b", 64), now.Add(5*time.Second)); !errors.Is(err, journal.ErrSandboxClaimed) {
 		t.Fatalf("post-success ClaimSandboxCleanup error = %v, want ErrSandboxClaimed", err)
 	}
+}
+
+func TestCorruptSandboxClaimFailsClosedAndRemainsRetryable(t *testing.T) {
+	testCases := []struct {
+		name       string
+		claimID    string
+		resource   bool
+		generation string
+	}{
+		{name: "legacy empty", claimID: ""},
+		{name: "malformed", claimID: "not-a-claim"},
+		{name: "legacy empty manifest generation", claimID: testSandboxClaimID, resource: true, generation: ""},
+		{name: "malformed manifest generation", claimID: testSandboxClaimID, resource: true, generation: "not-a-generation"},
+	}
+	for _, testCase := range testCases {
+		t.Run(testCase.name, func(t *testing.T) {
+			ctx := context.Background()
+			now := time.Date(2026, time.July, 15, 18, 15, 0, 0, time.UTC)
+			path := filepath.Join(t.TempDir(), "rehearse.db")
+			store, _, run := createPlanAndRun(t, ctx, path, now)
+
+			database, err := sql.Open("sqlite", path)
+			if err != nil {
+				t.Fatalf("open corruption injector: %v", err)
+			}
+			if _, err := database.ExecContext(ctx, "PRAGMA ignore_check_constraints = ON"); err != nil {
+				t.Fatalf("enable corruption injection: %v", err)
+			}
+			if _, err := database.ExecContext(ctx, `
+				INSERT INTO sandbox_cleanup_claims(run_id, claim_id, status, claimed_at, updated_at)
+				VALUES (?, ?, 'pending', ?, ?)
+			`, run.ID, testCase.claimID, now.Format(time.RFC3339Nano), now.Format(time.RFC3339Nano)); err != nil {
+				t.Fatalf("inject corrupt sandbox claim: %v", err)
+			}
+			if testCase.resource {
+				if _, err := database.ExecContext(ctx, `
+					INSERT INTO sandbox_cleanup_resources(run_id, claim_id, kind, name, generation_id, expected_at)
+					VALUES (?, ?, 'volume', 'rehearse-corrupt', ?, ?)
+				`, run.ID, testCase.claimID, testCase.generation, now.Format(time.RFC3339Nano)); err != nil {
+					t.Fatalf("inject corrupt sandbox manifest: %v", err)
+				}
+			}
+			if err := database.Close(); err != nil {
+				t.Fatalf("close corruption injector: %v", err)
+			}
+			if err := store.Close(); err != nil {
+				t.Fatalf("close initial store: %v", err)
+			}
+			store, err = journal.Open(ctx, path)
+			if err != nil {
+				t.Fatalf("reopen corrupt journal: %v", err)
+			}
+			t.Cleanup(func() { _ = store.Close() })
+
+			if _, _, active, err := store.SandboxCleanupClaim(ctx, run.ID); !errors.Is(err, journal.ErrCorruptSandboxClaim) || active {
+				t.Fatalf("SandboxCleanupClaim active=%t error=%v, want corrupt inactive result", active, err)
+			}
+			cleaner := &neverCalledCleaner{}
+			janitor := sandbox.NewJanitor(store, cleaner, sandbox.JanitorOptions{CleanupTimeout: time.Second, Now: func() time.Time { return now.Add(time.Hour) }})
+			for attempt := 0; attempt < 2; attempt++ {
+				if err := janitor.Reconcile(ctx); !errors.Is(err, journal.ErrCorruptSandboxClaim) {
+					t.Fatalf("reconcile attempt %d error = %v, want corrupt claim", attempt+1, err)
+				}
+			}
+			if cleaner.calls != 0 {
+				t.Fatalf("Docker cleaner called %d times for corrupt ownership", cleaner.calls)
+			}
+			queued, err := store.RunsNeedingReconciliation(ctx)
+			if err != nil || len(queued) != 1 || queued[0].Cleanup != drill.CleanupFailed || !queued[0].NeedsReconciliation {
+				t.Fatalf("corrupt claim queue = %#v, error %v", queued, err)
+			}
+		})
+	}
+}
+
+type neverCalledCleaner struct {
+	calls int
+}
+
+func (cleaner *neverCalledCleaner) Cleanup(context.Context, string, string, []drill.SandboxResourceClaim) error {
+	cleaner.calls++
+	return nil
 }
 
 func TestSandboxClaimAndJanitorQueueStayExclusiveAcrossTransition(t *testing.T) {

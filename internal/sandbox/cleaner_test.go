@@ -9,7 +9,11 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/azizu06/rehearse/internal/drill"
 )
+
+const testResourceGeneration = "2222222222222222222222222222222222222222222222222222222222222222"
 
 func TestCleanerRequiresSeparatedEmptyScansAndFindsDelayedResource(t *testing.T) {
 	identity := claimedTestIdentity(t, "run-1")
@@ -17,10 +21,11 @@ func TestCleanerRequiresSeparatedEmptyScansAndFindsDelayedResource(t *testing.T)
 		"container": {nil, nil, nil, nil},
 		"network":   {nil, nil, nil, nil},
 		"volume":    {nil, []byte("delayed-volume\n"), nil, nil},
-	}, identity: identity}
+	}, identity: identity, generation: testResourceGeneration}
 	waiter := &recordingWaiter{}
 	cleaner := cleaner{command: command, waiter: waiter, quiescence: 500 * time.Millisecond}
-	if err := cleaner.cleanupClaim(context.Background(), identity); err != nil {
+	manifest := []drill.SandboxResourceClaim{{Kind: "volume", Name: "delayed-volume", Generation: testResourceGeneration}}
+	if err := cleaner.cleanupManifest(context.Background(), identity, manifest); err != nil {
 		t.Fatalf("cleanup: %v", err)
 	}
 	if got, want := waiter.durations, []time.Duration{500 * time.Millisecond, 500 * time.Millisecond, 500 * time.Millisecond}; !reflect.DeepEqual(got, want) {
@@ -31,7 +36,7 @@ func TestCleanerRequiresSeparatedEmptyScansAndFindsDelayedResource(t *testing.T)
 	}
 	for _, call := range command.calls {
 		joined := strings.Join(call, " ")
-		if strings.Contains(joined, " ls ") && (!strings.Contains(joined, "label="+managedLabel+"=true") || !strings.Contains(joined, "label="+runFingerprintLabel+"="+identity.fingerprint) || !strings.Contains(joined, "label="+runIDLabel+"="+identity.runID)) {
+		if strings.Contains(joined, " ls ") && !strings.Contains(joined, "name=^") && (!strings.Contains(joined, "label="+managedLabel+"=true") || !strings.Contains(joined, "label="+runFingerprintLabel+"="+identity.fingerprint) || !strings.Contains(joined, "label="+runIDLabel+"="+identity.runID)) {
 			t.Fatalf("unscoped list call: %v", call)
 		}
 	}
@@ -41,7 +46,7 @@ func TestCleanerReturnsFailureWhenQuiescenceContextExpires(t *testing.T) {
 	identity := claimedTestIdentity(t, "run-1")
 	waiter := &recordingWaiter{err: context.DeadlineExceeded}
 	cleaner := cleaner{command: &scriptedDocker{}, waiter: waiter, quiescence: 500 * time.Millisecond}
-	if err := cleaner.cleanupClaim(context.Background(), identity); !errors.Is(err, context.DeadlineExceeded) {
+	if err := cleaner.cleanupManifest(context.Background(), identity, nil); !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("cleanup error = %v, want context deadline", err)
 	}
 }
@@ -50,11 +55,24 @@ func TestCleanerIsIdempotentWhenNoResourcesExist(t *testing.T) {
 	identity := claimedTestIdentity(t, "run-idempotent")
 	command := &scriptedDocker{}
 	cleaner := cleaner{command: command, waiter: &recordingWaiter{}, quiescence: 500 * time.Millisecond}
-	if err := cleaner.cleanupClaim(context.Background(), identity); err != nil {
+	if err := cleaner.cleanupManifest(context.Background(), identity, nil); err != nil {
 		t.Fatalf("first cleanup: %v", err)
 	}
-	if err := cleaner.cleanupClaim(context.Background(), identity); err != nil {
+	if err := cleaner.cleanupManifest(context.Background(), identity, nil); err != nil {
 		t.Fatalf("second cleanup: %v", err)
+	}
+}
+
+func TestStartupCleanupTreatsPreCreateManifestEntryAsAbsent(t *testing.T) {
+	identity := claimedTestIdentity(t, "run-pre-create-crash")
+	command := &runnerDocker{resources: make(map[string]inspectedResource)}
+	cleaner := cleaner{command: command, waiter: &recordingWaiter{}, quiescence: 500 * time.Millisecond}
+	manifest := []drill.SandboxResourceClaim{{Kind: "volume", Name: identity.projectName + "_work", Generation: testResourceGeneration}}
+	if err := cleaner.cleanupManifest(context.Background(), identity, manifest); err != nil {
+		t.Fatalf("cleanup pre-create manifest: %v", err)
+	}
+	if len(command.removed) != 0 {
+		t.Fatalf("pre-create crash cleanup removed resources: %#v", command.removed)
 	}
 }
 
@@ -64,9 +82,10 @@ func TestCleanerDoesNotCascadeContainerRemovalIntoUnlabeledVolumes(t *testing.T)
 		"container": {[]byte("owned-container\n"), nil, nil},
 		"network":   {nil, nil, nil},
 		"volume":    {nil, nil, nil},
-	}, identity: identity}
+	}, identity: identity, generation: testResourceGeneration}
 	cleaner := cleaner{command: command, waiter: &recordingWaiter{}, quiescence: 500 * time.Millisecond}
-	if err := cleaner.cleanupClaim(context.Background(), identity); err != nil {
+	manifest := []drill.SandboxResourceClaim{{Kind: "container", Name: "owned-container", Generation: testResourceGeneration}}
+	if err := cleaner.cleanupManifest(context.Background(), identity, manifest); err != nil {
 		t.Fatalf("cleanup: %v", err)
 	}
 	if !command.calledWith("container", "rm", "--force", "owned-container") {
@@ -82,14 +101,15 @@ func TestCleanerDoesNotCascadeContainerRemovalIntoUnlabeledVolumes(t *testing.T)
 	}
 }
 
-func TestLiveCleanupPreservesDaemonIdentityReplacement(t *testing.T) {
+func TestLiveCleanupPreservesSameTimestampVolumeGenerationReplacement(t *testing.T) {
 	identity := claimedTestIdentity(t, "run-daemon-replacement")
 	name := identity.projectName + "_work"
+	replacementLabels, _ := resourceLabels(identity, strings.Repeat("3", 64))
 	command := &runnerDocker{resources: map[string]inspectedResource{
-		"volume\x00" + name: {DaemonID: "replacement-created-at", Name: name, Labels: identity.labels()},
+		"volume\x00" + name: {DaemonID: "same-created-at", Name: name, Labels: replacementLabels},
 	}}
 	ledger := newCreatedResourceLedger()
-	ledger.add(createdResource{kind: "volume", name: name, daemonID: "original-created-at"})
+	ledger.add(createdResource{kind: "volume", name: name, daemonID: "same-created-at", generation: testResourceGeneration})
 	cleaner := cleaner{command: command, waiter: &recordingWaiter{}, quiescence: 500 * time.Millisecond}
 	if err := cleaner.cleanupCreated(context.Background(), identity, ledger); err != nil {
 		t.Fatalf("cleanupCreated: %v", err)
@@ -107,13 +127,14 @@ func TestLiveCleanupRemovesDependenciesInDockerOrder(t *testing.T) {
 	command := &runnerDocker{resources: make(map[string]inspectedResource)}
 	ledger := newCreatedResourceLedger()
 	for _, resource := range []createdResource{
-		{kind: "volume", name: "work", daemonID: "volume-id"},
-		{kind: "network", name: "default", daemonID: "network-id"},
-		{kind: "container", name: "worker", daemonID: "container-id"},
+		{kind: "volume", name: "work", generation: testResourceGeneration},
+		{kind: "network", name: "default", daemonID: "network-id", generation: testResourceGeneration},
+		{kind: "container", name: "worker", daemonID: "container-id", generation: testResourceGeneration},
 	} {
 		ledger.add(resource)
+		labels, _ := resourceLabels(identity, resource.generation)
 		command.resources[resource.kind+"\x00"+resource.name] = inspectedResource{
-			DaemonID: resource.daemonID, Name: resource.name, Labels: identity.labels(),
+			DaemonID: resource.daemonID, Name: resource.name, Labels: labels,
 		}
 	}
 	cleaner := cleaner{command: command, waiter: &recordingWaiter{}, quiescence: 500 * time.Millisecond}
@@ -136,14 +157,16 @@ func TestStartupCleanupPreservesStableAndStaleClaimResources(t *testing.T) {
 	if err != nil {
 		t.Fatalf("withClaimID: %v", err)
 	}
+	activeLabels, _ := resourceLabels(active, testResourceGeneration)
 	command := &runnerDocker{resources: map[string]inspectedResource{
-		"volume\x00active": {DaemonID: "active-created-at", Name: "active", Labels: active.labels()},
-		"volume\x00stable": {DaemonID: "stable-created-at", Name: "stable", Labels: stable.labels()},
-		"volume\x00stale":  {DaemonID: "stale-created-at", Name: "stale", Labels: stale.labels()},
+		"volume\x00active": {Name: "active", Labels: activeLabels},
+		"volume\x00stable": {Name: "stable", Labels: stable.labels()},
+		"volume\x00stale":  {Name: "stale", Labels: stale.labels()},
 	}}
 	cleaner := cleaner{command: command, waiter: &recordingWaiter{}, quiescence: 500 * time.Millisecond}
-	if err := cleaner.cleanupClaim(context.Background(), active); err != nil {
-		t.Fatalf("cleanupClaim: %v", err)
+	manifest := []drill.SandboxResourceClaim{{Kind: "volume", Name: "active", Generation: testResourceGeneration}}
+	if err := cleaner.cleanupManifest(context.Background(), active, manifest); err != nil {
+		t.Fatalf("cleanupManifest: %v", err)
 	}
 	if _, exists := command.resources["volume\x00active"]; exists {
 		t.Fatal("startup cleanup left the active-claim resource")
@@ -156,10 +179,11 @@ func TestStartupCleanupPreservesStableAndStaleClaimResources(t *testing.T) {
 }
 
 type scriptedDocker struct {
-	mu       sync.Mutex
-	lists    map[string][][]byte
-	calls    [][]string
-	identity identity
+	mu         sync.Mutex
+	lists      map[string][][]byte
+	calls      [][]string
+	identity   identity
+	generation string
 }
 
 func (docker *scriptedDocker) run(_ context.Context, _ int64, args ...string) ([]byte, error) {
@@ -179,7 +203,8 @@ func (docker *scriptedDocker) run(_ context.Context, _ int64, args ...string) ([
 		if args[0] == "volume" {
 			daemonID = "volume-created-at"
 		}
-		return json.Marshal(inspectedResource{DaemonID: daemonID, Name: name, Labels: docker.identity.labels()})
+		labels, _ := resourceLabels(docker.identity, docker.generation)
+		return json.Marshal(inspectedResource{DaemonID: daemonID, Name: name, Labels: labels})
 	}
 	return nil, nil
 }

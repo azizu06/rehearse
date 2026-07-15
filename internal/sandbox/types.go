@@ -21,15 +21,16 @@ import (
 )
 
 const (
-	managedLabel        = "dev.rehearse.managed"
-	projectLabel        = "dev.rehearse.project"
-	runFingerprintLabel = "dev.rehearse.run-fingerprint"
-	runIDLabel          = "dev.rehearse.run-id"
-	sandboxClaimLabel   = "dev.rehearse.sandbox-claim"
-	projectPrefix       = "rehearse-"
-	projectDigestLength = 24
-	sandboxClaimBytes   = 32
-	maxComposeKeyLength = 26
+	managedLabel            = "dev.rehearse.managed"
+	projectLabel            = "dev.rehearse.project"
+	runFingerprintLabel     = "dev.rehearse.run-fingerprint"
+	runIDLabel              = "dev.rehearse.run-id"
+	sandboxClaimLabel       = "dev.rehearse.sandbox-claim"
+	resourceGenerationLabel = "dev.rehearse.resource-generation"
+	projectPrefix           = "rehearse-"
+	projectDigestLength     = 24
+	sandboxClaimBytes       = 32
+	maxComposeKeyLength     = 26
 )
 
 var (
@@ -83,6 +84,7 @@ type DockerRunnerOptions struct {
 // reconciliation.
 type CleanupJournal interface {
 	ClaimSandboxCleanup(context.Context, string, string, time.Time) error
+	AppendSandboxCleanupResource(context.Context, string, string, drill.SandboxResourceClaim, time.Time) error
 	RecordSandboxCleanup(context.Context, string, drill.CleanupStatus, time.Time) error
 }
 
@@ -137,8 +139,7 @@ func (value identity) labels() map[string]string {
 }
 
 func (value identity) withClaimID(claimID string) (identity, error) {
-	decoded, err := hex.DecodeString(claimID)
-	if err != nil || len(decoded) != sandboxClaimBytes || claimID != strings.ToLower(claimID) {
+	if !validOwnershipID(claimID) {
 		return identity{}, fmt.Errorf("%w: sandbox claim ID must be 64 lowercase hexadecimal characters", ErrInvalidRequest)
 	}
 	value.claimID = claimID
@@ -146,11 +147,33 @@ func (value identity) withClaimID(claimID string) (identity, error) {
 }
 
 func generateClaimID() (string, error) {
+	return generateOwnershipID("sandbox claim")
+}
+
+func generateResourceGenerationID() (string, error) {
+	return generateOwnershipID("sandbox resource generation")
+}
+
+func generateOwnershipID(kind string) (string, error) {
 	random := make([]byte, sandboxClaimBytes)
 	if _, err := rand.Read(random); err != nil {
-		return "", fmt.Errorf("generate sandbox claim ID: %w", err)
+		return "", fmt.Errorf("generate %s ID: %w", kind, err)
 	}
 	return hex.EncodeToString(random), nil
+}
+
+func resourceLabels(identity identity, generation string) (map[string]string, error) {
+	if !validOwnershipID(generation) {
+		return nil, fmt.Errorf("%w: sandbox resource generation ID must be 64 lowercase hexadecimal characters", ErrInvalidRequest)
+	}
+	labels := identity.labels()
+	labels[resourceGenerationLabel] = generation
+	return labels, nil
+}
+
+func validOwnershipID(value string) bool {
+	decoded, err := hex.DecodeString(value)
+	return err == nil && len(decoded) == sandboxClaimBytes && value == strings.ToLower(value)
 }
 
 func normalizeRequest(request Request) (normalizedRequest, error) {

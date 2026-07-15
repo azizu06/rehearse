@@ -23,6 +23,10 @@ var (
 	ErrConcurrentMutation = errors.New("run changed concurrently")
 	// ErrSandboxClaimed identifies a run whose one sandbox lifecycle is already owned.
 	ErrSandboxClaimed = errors.New("sandbox cleanup already claimed")
+	// ErrSandboxResourceClaimed identifies a duplicate expected sandbox resource.
+	ErrSandboxResourceClaimed = errors.New("sandbox cleanup resource already claimed")
+	// ErrCorruptSandboxClaim identifies unsafe durable cleanup ownership state.
+	ErrCorruptSandboxClaim = errors.New("corrupt sandbox cleanup ownership requires manual intervention")
 	// ErrJournalOwned identifies a journal already held by another live runtime.
 	ErrJournalOwned = errors.New("journal is already owned by another runtime")
 )
@@ -247,29 +251,115 @@ func (store *Store) ClaimSandboxCleanup(ctx context.Context, id, claimID string,
 	return nil
 }
 
-// SandboxCleanupClaim returns the active deletion authority for one run.
-func (store *Store) SandboxCleanupClaim(ctx context.Context, id string) (string, bool, error) {
+// AppendSandboxCleanupResource durably records one expected resource before creation.
+func (store *Store) AppendSandboxCleanupResource(ctx context.Context, id, claimID string, resource drill.SandboxResourceClaim, at time.Time) error {
+	if at.IsZero() || !validSandboxClaimID(claimID) || !validSandboxResourceClaim(resource) {
+		return drill.ErrInvalidRun
+	}
+	transaction, err := store.database.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin sandbox resource claim: %w", err)
+	}
+	defer func() { _ = transaction.Rollback() }()
+	var storedClaimID, status string
+	err = transaction.QueryRowContext(ctx, `
+		SELECT claim_id, status
+		FROM sandbox_cleanup_claims
+		WHERE run_id = ?
+	`, id).Scan(&storedClaimID, &status)
+	if errors.Is(err, sql.ErrNoRows) {
+		return ErrNotFound
+	}
+	if err != nil {
+		return fmt.Errorf("load sandbox cleanup claim for resource: %w", err)
+	}
+	if !validSandboxClaimID(storedClaimID) {
+		return ErrCorruptSandboxClaim
+	}
+	if storedClaimID != claimID || status != "pending" {
+		return ErrSandboxClaimed
+	}
+	if _, err := transaction.ExecContext(ctx, `
+		INSERT INTO sandbox_cleanup_resources(
+			run_id, claim_id, kind, name, generation_id, expected_at
+		) VALUES (?, ?, ?, ?, ?, ?)
+	`, id, claimID, resource.Kind, resource.Name, resource.Generation, formatTime(at)); err != nil {
+		if strings.Contains(err.Error(), "UNIQUE constraint failed") {
+			return ErrSandboxResourceClaimed
+		}
+		return fmt.Errorf("append sandbox cleanup resource: %w", err)
+	}
+	if err := transaction.Commit(); err != nil {
+		return fmt.Errorf("commit sandbox resource claim: %w", err)
+	}
+	return nil
+}
+
+// SandboxCleanupClaim returns the active deletion authority and expected resources.
+func (store *Store) SandboxCleanupClaim(ctx context.Context, id string) (string, []drill.SandboxResourceClaim, bool, error) {
+	transaction, err := store.database.BeginTx(ctx, nil)
+	if err != nil {
+		return "", nil, false, fmt.Errorf("begin sandbox cleanup claim read: %w", err)
+	}
+	defer func() { _ = transaction.Rollback() }()
 	var claimID string
-	err := store.database.QueryRowContext(ctx, `
+	err = transaction.QueryRowContext(ctx, `
 		SELECT claim_id
 		FROM sandbox_cleanup_claims
 		WHERE run_id = ? AND status IN ('pending', 'failed')
 	`, id).Scan(&claimID)
 	if errors.Is(err, sql.ErrNoRows) {
-		return "", false, nil
+		return "", nil, false, nil
 	}
 	if err != nil {
-		return "", false, fmt.Errorf("load sandbox cleanup claim: %w", err)
+		return "", nil, false, fmt.Errorf("load sandbox cleanup claim: %w", err)
 	}
 	if !validSandboxClaimID(claimID) {
-		return "", false, nil
+		return "", nil, false, ErrCorruptSandboxClaim
 	}
-	return claimID, true, nil
+	rows, err := transaction.QueryContext(ctx, `
+		SELECT kind, name, generation_id
+		FROM sandbox_cleanup_resources
+		WHERE run_id = ? AND claim_id = ?
+		ORDER BY kind, name
+	`, id, claimID)
+	if err != nil {
+		return "", nil, false, fmt.Errorf("load sandbox cleanup manifest: %w", err)
+	}
+	var resources []drill.SandboxResourceClaim
+	for rows.Next() {
+		var resource drill.SandboxResourceClaim
+		if err := rows.Scan(&resource.Kind, &resource.Name, &resource.Generation); err != nil {
+			return "", nil, false, fmt.Errorf("scan sandbox cleanup manifest: %w", err)
+		}
+		if !validSandboxResourceClaim(resource) {
+			return "", nil, false, ErrCorruptSandboxClaim
+		}
+		resources = append(resources, resource)
+	}
+	if err := rows.Err(); err != nil {
+		_ = rows.Close()
+		return "", nil, false, fmt.Errorf("iterate sandbox cleanup manifest: %w", err)
+	}
+	if err := rows.Close(); err != nil {
+		return "", nil, false, fmt.Errorf("close sandbox cleanup manifest: %w", err)
+	}
+	if err := transaction.Commit(); err != nil {
+		return "", nil, false, fmt.Errorf("commit sandbox cleanup claim read: %w", err)
+	}
+	return claimID, resources, true, nil
 }
 
 func validSandboxClaimID(claimID string) bool {
 	decoded, err := hex.DecodeString(claimID)
 	return err == nil && len(decoded) == 32 && claimID == strings.ToLower(claimID)
+}
+
+func validSandboxResourceClaim(resource drill.SandboxResourceClaim) bool {
+	if resource.Kind != "container" && resource.Kind != "network" && resource.Kind != "volume" {
+		return false
+	}
+	return len(resource.Name) > 0 && len(resource.Name) <= 255 && validSandboxClaimID(resource.Generation)
 }
 
 // RecordSandboxCleanup closes or preserves the durable sandbox cleanup claim.

@@ -129,6 +129,7 @@ func TestCleanerWaitsForAndRemovesDelayedResources(t *testing.T) {
 	runID := "integration-delayed-cleanup"
 	runFingerprint := fingerprint(runID)
 	claimID := strings.Repeat("c", 64)
+	generation := strings.Repeat("e", 64)
 	projectName := "rehearse-" + runFingerprint[:24]
 	volumeName := "rehearse-delayed-" + runFingerprint[:12]
 	_ = exec.Command("docker", "volume", "rm", "--force", volumeName).Run()
@@ -142,6 +143,7 @@ func TestCleanerWaitsForAndRemovesDelayedResources(t *testing.T) {
 			"--label", "dev.rehearse.project="+projectName,
 			"--label", "dev.rehearse.run-id="+runID,
 			"--label", "dev.rehearse.sandbox-claim="+claimID,
+			"--label", "dev.rehearse.resource-generation="+generation,
 			volumeName,
 		)
 		_ = command.Run()
@@ -152,7 +154,8 @@ func TestCleanerWaitsForAndRemovesDelayedResources(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	started := time.Now()
-	if err := cleaner.Cleanup(ctx, runID, claimID); err != nil {
+	manifest := []drill.SandboxResourceClaim{{Kind: "volume", Name: volumeName, Generation: generation}}
+	if err := cleaner.Cleanup(ctx, runID, claimID, manifest); err != nil {
 		t.Fatalf("Cleanup: %v", err)
 	}
 	<-created
@@ -174,11 +177,32 @@ func TestCleanerDoesNotDeleteUnrelatedDockerResources(t *testing.T) {
 	cleaner := sandbox.NewCleaner(sandbox.CleanerOptions{Binary: "docker"})
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
-	if err := cleaner.Cleanup(ctx, "integration-unrelated-scope", strings.Repeat("d", 64)); err != nil {
+	if err := cleaner.Cleanup(ctx, "integration-unrelated-scope", strings.Repeat("d", 64), nil); err != nil {
 		t.Fatalf("Cleanup: %v", err)
 	}
 	if got := dockerOutput(t, "volume", "ls", "--quiet", "--filter", "name="+name); got == "" {
 		t.Fatal("cleaner deleted an unrelated volume")
+	}
+}
+
+func TestRealDockerStartupCleanupHandlesPreCreateCrashWindow(t *testing.T) {
+	requireDockerIntegration(t)
+
+	runID := "integration-pre-create-crash"
+	claimID := strings.Repeat("8", 64)
+	generation := strings.Repeat("9", 64)
+	name := "rehearse-" + fingerprint(runID)[:24] + "_work"
+	_ = exec.Command("docker", "volume", "rm", "--force", name).Run()
+
+	cleaner := sandbox.NewCleaner(sandbox.CleanerOptions{Binary: "docker", LockRoot: t.TempDir()})
+	manifest := []drill.SandboxResourceClaim{{Kind: "volume", Name: name, Generation: generation}}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := cleaner.Cleanup(ctx, runID, claimID, manifest); err != nil {
+		t.Fatalf("Cleanup pre-create manifest: %v", err)
+	}
+	if got := dockerOutput(t, "volume", "ls", "--quiet", "--filter", "name=^"+name+"$"); got != "" {
+		t.Fatalf("pre-create crash window unexpectedly created a resource: %s", got)
 	}
 }
 
@@ -259,6 +283,7 @@ func TestStartupCleanerUsesOnlyTheActiveSandboxClaim(t *testing.T) {
 	projectName := "rehearse-" + runFingerprint[:24]
 	activeClaim := strings.Repeat("f", 64)
 	staleClaim := strings.Repeat("a", 64)
+	activeGeneration := strings.Repeat("b", 64)
 	names := map[string]string{
 		"active": projectName + "_active",
 		"stable": projectName + "_stable",
@@ -269,7 +294,7 @@ func TestStartupCleanerUsesOnlyTheActiveSandboxClaim(t *testing.T) {
 		name := name
 		t.Cleanup(func() { _ = exec.Command("docker", "volume", "rm", "--force", name).Run() })
 	}
-	create := func(name, claimID string) {
+	create := func(name, claimID, generation string) {
 		args := []string{"volume", "create",
 			"--label", "dev.rehearse.managed=true",
 			"--label", "dev.rehearse.run-fingerprint=" + runFingerprint,
@@ -279,16 +304,20 @@ func TestStartupCleanerUsesOnlyTheActiveSandboxClaim(t *testing.T) {
 		if claimID != "" {
 			args = append(args, "--label", "dev.rehearse.sandbox-claim="+claimID)
 		}
+		if generation != "" {
+			args = append(args, "--label", "dev.rehearse.resource-generation="+generation)
+		}
 		dockerOutput(t, append(args, name)...)
 	}
-	create(names["active"], activeClaim)
-	create(names["stable"], "")
-	create(names["stale"], staleClaim)
+	create(names["active"], activeClaim, activeGeneration)
+	create(names["stable"], "", "")
+	create(names["stale"], staleClaim, strings.Repeat("9", 64))
 
 	cleaner := sandbox.NewCleaner(sandbox.CleanerOptions{Binary: "docker", LockRoot: t.TempDir()})
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	if err := cleaner.Cleanup(ctx, runID, activeClaim); err != nil {
+	manifest := []drill.SandboxResourceClaim{{Kind: "volume", Name: names["active"], Generation: activeGeneration}}
+	if err := cleaner.Cleanup(ctx, runID, activeClaim, manifest); err != nil {
 		t.Fatalf("Cleanup: %v", err)
 	}
 	if got := dockerOutput(t, "volume", "ls", "--quiet", "--filter", "name=^"+names["active"]+"$"); got != "" {
@@ -486,9 +515,12 @@ func TestStartupJanitorRecoversAfterForcedProcessKill(t *testing.T) {
 		t.Fatalf("reopen forced-kill journal: %v", err)
 	}
 	t.Cleanup(func() { _ = store.Close() })
-	durableClaim, active, err := store.SandboxCleanupClaim(context.Background(), runID)
+	durableClaim, manifest, active, err := store.SandboxCleanupClaim(context.Background(), runID)
 	if err != nil || !active || durableClaim != claimLabel {
 		t.Fatalf("durable forced-kill claim = %q active=%t error=%v, want %q", durableClaim, active, err, claimLabel)
+	}
+	if len(manifest) < 2 {
+		t.Fatalf("durable forced-kill manifest = %#v, want created project resources", manifest)
 	}
 	cleaner := sandbox.NewCleaner(sandbox.CleanerOptions{Binary: "docker", LockRoot: lockRoot, TemporaryRoot: directory})
 	janitor := sandbox.NewJanitor(store, cleaner, sandbox.JanitorOptions{CleanupTimeout: 10 * time.Second})

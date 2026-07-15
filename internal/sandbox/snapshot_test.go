@@ -24,7 +24,8 @@ func TestRunnerExecutesTheExactValidatedSnapshotAfterInputsMutate(t *testing.T) 
 		cleaner: cleaner{command: command, waiter: &recordingWaiter{}, quiescence: cleanupQuiescence, snapshotRoot: root},
 		journal: &recordingCleanupJournal{},
 		locker:  newProjectLocker(filepath.Join(root, "locks")), temporaryRoot: root, cleanupTimeout: time.Second,
-		newClaimID: func() (string, error) { return testClaimID, nil },
+		newClaimID:      func() (string, error) { return testClaimID, nil },
+		newGenerationID: testGenerationGenerator(),
 	}
 	request := Request{
 		RunID: "run-immutable-snapshot", ComposeFiles: []string{source}, ProjectDirectory: root,
@@ -143,6 +144,10 @@ func (docker *mutationDocker) run(_ context.Context, _ int64, args ...string) ([
 		want, err = rewriteSnapshotReservedResources(want, identity, model)
 		if err != nil {
 			docker.t.Fatalf("build expected reserved snapshot: %v", err)
+		}
+		want, err = applyComposeContainerGenerations(want, map[string]string{"worker": strings.Repeat("0", 63) + "2"})
+		if err != nil {
+			docker.t.Fatalf("build expected container generations: %v", err)
 		}
 		if !bytes.Equal(actual, want) {
 			docker.t.Fatal("validated and executed snapshot bytes differ")
