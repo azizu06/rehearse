@@ -15,7 +15,9 @@ Implement the first adapter through restic 0.18.0 or newer. Invoke the restic
 binary directly without a shell, request its documented JSON formats, bound
 stdout and stderr independently, tolerate additive JSON fields and message
 types, and never expose raw command output through errors, progress, logs, or
-artifacts. Repository reads use `--no-lock` and `--no-cache`.
+artifacts. Every JSON-lines object must carry a present, non-null string
+`message_type`; unknown string values remain forward-compatible and are ignored.
+Repository reads use `--no-lock` and `--no-cache`.
 
 Keep provider configuration typed. Restic receives a repository-password file
 and, for S3-compatible storage, an AWS shared-credentials file. Both are created

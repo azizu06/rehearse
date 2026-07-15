@@ -442,12 +442,40 @@ func removePrivateTree(path string) error {
 	return os.RemoveAll(path)
 }
 
-type restoreEnvelope struct {
-	MessageType string `json:"message_type"`
+type resticMessageType struct {
+	value   string
+	present bool
+}
+
+func (messageType *resticMessageType) UnmarshalJSON(data []byte) error {
+	if bytes.Equal(bytes.TrimSpace(data), []byte("null")) {
+		return errors.New("restic message_type must not be null")
+	}
+	var value string
+	if err := json.Unmarshal(data, &value); err != nil {
+		return err
+	}
+	messageType.value = value
+	messageType.present = true
+	return nil
+}
+
+type resticEnvelope struct {
+	MessageType resticMessageType `json:"message_type"`
+}
+
+func decodeResticMessageType(raw json.RawMessage) (string, error) {
+	var envelope resticEnvelope
+	if err := json.Unmarshal(raw, &envelope); err != nil {
+		return "", err
+	}
+	if !envelope.MessageType.present {
+		return "", errors.New("restic message_type is required")
+	}
+	return envelope.MessageType.value, nil
 }
 
 type restoreStatus struct {
-	MessageType   string          `json:"message_type"`
 	PercentDone   restoreFraction `json:"percent_done"`
 	FilesRestored restoreCounter  `json:"files_restored"`
 	TotalFiles    restoreCounter  `json:"total_files"`
@@ -456,7 +484,6 @@ type restoreStatus struct {
 }
 
 type restoreSummary struct {
-	MessageType   string         `json:"message_type"`
 	FilesRestored restoreCounter `json:"files_restored"`
 	TotalFiles    restoreCounter `json:"total_files"`
 	BytesRestored restoreCounter `json:"bytes_restored"`
@@ -606,8 +633,8 @@ func (adapter *Adapter) runRestore(
 			return &source.Failure{Kind: source.FailureCorruptOutput, Operation: "acquire", SafeHint: "restic returned invalid restore JSON"}
 		}
 
-		var envelope restoreEnvelope
-		if err := json.Unmarshal(raw, &envelope); err != nil {
+		messageType, err := decodeResticMessageType(raw)
+		if err != nil {
 			cancel()
 			_ = command.Wait()
 			if ctx.Err() != nil {
@@ -615,7 +642,7 @@ func (adapter *Adapter) runRestore(
 			}
 			return &source.Failure{Kind: source.FailureCorruptOutput, Operation: "acquire", SafeHint: "restic returned invalid restore JSON"}
 		}
-		switch envelope.MessageType {
+		switch messageType {
 		case "status":
 			var status restoreStatus
 			if err := json.Unmarshal(raw, &status); err != nil {
@@ -698,8 +725,7 @@ func (adapter *Adapter) runRestore(
 }
 
 type exitErrorMessage struct {
-	MessageType string `json:"message_type"`
-	Code        int    `json:"code"`
+	Code int `json:"code"`
 }
 
 func failureForExit(operation string, exitCode int, stderr []byte) error {
@@ -714,11 +740,15 @@ func failureForExit(operation string, exitCode int, stderr []byte) error {
 		if err != nil {
 			return &source.Failure{Kind: source.FailureCorruptOutput, Operation: operation, ExitCode: exitCode, SafeHint: "restic returned invalid error JSON"}
 		}
-		var message exitErrorMessage
-		if err := json.Unmarshal(raw, &message); err != nil {
+		messageType, err := decodeResticMessageType(raw)
+		if err != nil {
 			return &source.Failure{Kind: source.FailureCorruptOutput, Operation: operation, ExitCode: exitCode, SafeHint: "restic returned invalid error JSON"}
 		}
-		if message.MessageType == "exit_error" {
+		if messageType == "exit_error" {
+			var message exitErrorMessage
+			if err := json.Unmarshal(raw, &message); err != nil {
+				return &source.Failure{Kind: source.FailureCorruptOutput, Operation: operation, ExitCode: exitCode, SafeHint: "restic returned invalid error JSON"}
+			}
 			if message.Code != exitCode {
 				return &source.Failure{Kind: source.FailureCorruptOutput, Operation: operation, ExitCode: exitCode, SafeHint: "restic returned inconsistent error JSON"}
 			}

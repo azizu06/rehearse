@@ -80,6 +80,44 @@ exit `+strconv.Itoa(test.exitCode)+`
 	}
 }
 
+func TestListRejectsInvalidErrorMessageType(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		message string
+	}{
+		{name: "missing", message: `{"future_field":true}`},
+		{name: "null", message: `{"message_type":null}`},
+		{name: "wrong type", message: `{"message_type":false}`},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+
+			credentialTempDir := t.TempDir()
+			adapter := newTestAdapter(t, resticadapter.Config{
+				Binary: writeFakeResticScript(t, `
+printf '%s\n' '`+test.message+`' >&2
+printf '%s\n' '{"message_type":"exit_error","code":12}' >&2
+exit 12
+`),
+				Repository:        resticadapter.Repository{Kind: resticadapter.RepositoryLocal, Location: t.TempDir()},
+				Password:          drill.CredentialReference{Provider: drill.CredentialEnvironment, Locator: "REHEARSE_TEST_RESTIC_PASSWORD"},
+				CredentialTempDir: credentialTempDir,
+			})
+
+			_, err := adapter.ListRecoveryPoints(context.Background())
+			var failure *source.Failure
+			if !errors.As(err, &failure) || failure.Kind != source.FailureCorruptOutput {
+				t.Fatalf("failure = %+v, want corrupt output", failure)
+			}
+			assertDirectoryEmpty(t, credentialTempDir)
+		})
+	}
+}
+
 func TestListRecoveryPointsUsesCredentialFilesAndMapsJSON(t *testing.T) {
 	t.Parallel()
 
@@ -386,6 +424,60 @@ done
 mkdir -p "$target/private"
 printf 'partial-private-content' > "$target/private/item"
 printf '%s\n' '`+test.status+`'
+printf '%s\n' '{"message_type":"summary"}'
+`)
+			adapter := newTestAdapter(t, resticadapter.Config{
+				Binary:            binary,
+				Repository:        resticadapter.Repository{Kind: resticadapter.RepositoryLocal, Location: t.TempDir()},
+				Password:          drill.CredentialReference{Provider: drill.CredentialEnvironment, Locator: "REHEARSE_TEST_RESTIC_PASSWORD"},
+				CredentialTempDir: credentialTempDir,
+			})
+
+			_, err := adapter.Acquire(context.Background(), source.AcquireRequest{
+				RecoveryPointID: recoveryPointID,
+				Workspace:       workspace,
+			})
+			var failure *source.Failure
+			if !errors.As(err, &failure) || failure.Kind != source.FailureCorruptOutput {
+				t.Fatalf("failure = %+v, want corrupt output", failure)
+			}
+			assertDirectoryEmpty(t, workspace)
+			assertDirectoryEmpty(t, credentialTempDir)
+		})
+	}
+}
+
+func TestAcquireRejectsInvalidMessageTypeBeforePromotion(t *testing.T) {
+	t.Parallel()
+
+	const recoveryPointID = "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"
+	tests := []struct {
+		name    string
+		message string
+	}{
+		{name: "missing", message: `{"future_field":true}`},
+		{name: "null", message: `{"message_type":null}`},
+		{name: "boolean", message: `{"message_type":false}`},
+		{name: "number", message: `{"message_type":1}`},
+		{name: "object", message: `{"message_type":{}}`},
+		{name: "array", message: `{"message_type":[]}`},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+
+			workspace := t.TempDir()
+			credentialTempDir := t.TempDir()
+			binary := writeFakeResticScript(t, `
+target=""
+while test "$#" -gt 0; do
+  if test "$1" = "--target"; then target="$2"; shift; fi
+  shift
+done
+mkdir -p "$target/private"
+printf 'partial-private-content' > "$target/private/item"
+printf '%s\n' '`+test.message+`'
 printf '%s\n' '{"message_type":"summary"}'
 `)
 			adapter := newTestAdapter(t, resticadapter.Config{
