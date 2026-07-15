@@ -11,7 +11,8 @@ import (
 )
 
 // Adapter is a fully configured backup source. Provider-specific configuration
-// is deliberately kept outside this interface.
+// is deliberately kept outside this interface. Orchestration must successfully
+// call Capabilities on each new instance before ListRecoveryPoints or Acquire.
 type Adapter interface {
 	Capabilities(context.Context) (Capabilities, error)
 	ListRecoveryPoints(context.Context) ([]RecoveryPoint, error)

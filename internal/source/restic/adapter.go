@@ -15,6 +15,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/azizu06/rehearse/internal/drill"
@@ -68,8 +69,11 @@ type Config struct {
 
 // Adapter is one configured restic source.
 type Adapter struct {
-	config   Config
-	resolver source.CredentialResolver
+	config         Config
+	resolver       source.CredentialResolver
+	verification   sync.RWMutex
+	preflightReady bool
+	preflightEpoch uint64
 }
 
 // New validates static adapter configuration without resolving credentials.
@@ -164,6 +168,9 @@ type versionMessage struct {
 
 // Capabilities preflights the executable and its structured-output contract.
 func (adapter *Adapter) Capabilities(ctx context.Context) (source.Capabilities, error) {
+	epoch := adapter.beginPreflight()
+	verified := false
+	defer func() { adapter.completePreflight(epoch, verified) }()
 	stdout, _, err := adapter.run(ctx, "preflight", []string{"LANG=C", "LC_ALL=C"}, "version", "--json")
 	if err != nil {
 		return source.Capabilities{}, err
@@ -183,12 +190,39 @@ func (adapter *Adapter) Capabilities(ctx context.Context) (source.Capabilities, 
 			SafeHint:  "restic 0.18.0 or newer is required",
 		}
 	}
+	verified = true
 	return source.Capabilities{
 		AdapterVersion:  "restic/" + message.Version,
 		Lists:           true,
 		Acquires:        true,
 		ReportsProgress: true,
 	}, nil
+}
+
+func (adapter *Adapter) beginPreflight() uint64 {
+	adapter.verification.Lock()
+	defer adapter.verification.Unlock()
+	adapter.preflightEpoch++
+	adapter.preflightReady = false
+	return adapter.preflightEpoch
+}
+
+func (adapter *Adapter) completePreflight(epoch uint64, ready bool) {
+	adapter.verification.Lock()
+	defer adapter.verification.Unlock()
+	if adapter.preflightEpoch == epoch {
+		adapter.preflightReady = ready
+	}
+}
+
+func (adapter *Adapter) requirePreflight(operation string) error {
+	adapter.verification.RLock()
+	ready := adapter.preflightReady
+	adapter.verification.RUnlock()
+	if ready {
+		return nil
+	}
+	return &source.Failure{Kind: source.FailureUnsupported, Operation: operation, SafeHint: "restic capability preflight is required"}
 }
 
 func supportedVersion(version string) bool {
@@ -206,23 +240,31 @@ var (
 )
 
 type boundedBuffer struct {
-	buffer bytes.Buffer
-	limit  int64
-	over   bool
+	buffer  bytes.Buffer
+	limit   int64
+	over    bool
+	onLimit func()
 }
 
 func (buffer *boundedBuffer) Write(data []byte) (int, error) {
 	remaining := buffer.limit - int64(buffer.buffer.Len())
 	if remaining <= 0 {
-		buffer.over = true
+		buffer.markOver()
 		return len(data), errOutputLimit
 	}
 	if int64(len(data)) > remaining {
 		_, _ = buffer.buffer.Write(data[:remaining])
-		buffer.over = true
+		buffer.markOver()
 		return len(data), errOutputLimit
 	}
 	return buffer.buffer.Write(data)
+}
+
+func (buffer *boundedBuffer) markOver() {
+	buffer.over = true
+	if buffer.onLimit != nil {
+		buffer.onLimit()
+	}
 }
 
 func (buffer *boundedBuffer) Bytes() []byte {
@@ -230,9 +272,11 @@ func (buffer *boundedBuffer) Bytes() []byte {
 }
 
 func (adapter *Adapter) run(ctx context.Context, operation string, environment []string, args ...string) ([]byte, []byte, error) {
-	var stdout = boundedBuffer{limit: adapter.config.MaxStdoutBytes}
-	var stderr = boundedBuffer{limit: adapter.config.MaxStderrBytes}
-	command := exec.CommandContext(ctx, adapter.config.Binary, args...)
+	commandCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	var stdout = boundedBuffer{limit: adapter.config.MaxStdoutBytes, onLimit: cancel}
+	var stderr = boundedBuffer{limit: adapter.config.MaxStderrBytes, onLimit: cancel}
+	command := exec.CommandContext(commandCtx, adapter.config.Binary, args...)
 	command.Env = environment
 	command.Stdout = &stdout
 	command.Stderr = &stderr
@@ -269,6 +313,9 @@ type snapshotSummary struct {
 
 // ListRecoveryPoints maps restic snapshot JSON into the source contract.
 func (adapter *Adapter) ListRecoveryPoints(ctx context.Context) ([]source.RecoveryPoint, error) {
+	if err := adapter.requirePreflight("list"); err != nil {
+		return nil, err
+	}
 	var stdout []byte
 	err := adapter.withCredentialEnvironment(ctx, "list", func(environment []string) error {
 		var runErr error
@@ -530,6 +577,9 @@ func (fraction *restoreFraction) UnmarshalJSON(data []byte) error {
 // Acquire restores one full snapshot into a private staging child, then
 // atomically promotes it after a valid completion summary.
 func (adapter *Adapter) Acquire(ctx context.Context, request source.AcquireRequest) (_ source.Artifact, returnErr error) {
+	if err := adapter.requirePreflight("acquire"); err != nil {
+		return source.Artifact{}, err
+	}
 	if !snapshotIDPattern.MatchString(request.RecoveryPointID) {
 		return source.Artifact{}, &source.Failure{Kind: source.FailureInvalidInput, Operation: "acquire", SafeHint: "a full restic snapshot ID is required"}
 	}
@@ -600,7 +650,7 @@ func (adapter *Adapter) runRestore(
 	commandCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
-	var stderr = boundedBuffer{limit: adapter.config.MaxStderrBytes}
+	var stderr = boundedBuffer{limit: adapter.config.MaxStderrBytes, onLimit: cancel}
 	command := exec.CommandContext(commandCtx, adapter.config.Binary, args...)
 	command.Env = environment
 	command.Stderr = &stderr

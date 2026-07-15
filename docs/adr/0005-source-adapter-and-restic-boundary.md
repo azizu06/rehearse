@@ -11,6 +11,14 @@ recovery point. Recovery-point metadata, aggregate progress, directory artifacts
 and failures are typed. Cancellation and deadlines are controlled only by the
 caller's context.
 
+Each configured adapter instance starts unverified. Orchestration must complete
+`Capabilities` successfully on that instance before listing or acquisition;
+those operations fail closed while preflight is absent or in progress. A failed
+or cancelled re-preflight revokes an earlier success. Verification state is
+concurrency-safe and process-local: it is not persisted or reused by a new
+adapter instance after a Rehearse restart, and repository operations do not
+silently spawn their own version checks.
+
 Implement the first adapter through restic 0.18.0 or newer. Invoke the restic
 binary directly without a shell, request its documented JSON formats, bound
 stdout and stderr independently with hard configuration ceilings of 64 MiB and
@@ -57,6 +65,9 @@ prevents a partial restore from masquerading as a usable recovery artifact.
   failed acquisition cleanup remains the source adapter's responsibility.
 - Caller context state is the only source of cancelled or timed-out failures.
   Restic exit 130 with a live caller context is an independent process failure.
+- Each configured adapter instance has an explicit preflight lifecycle. A
+  successful capability check enables repository operations only until that
+  instance is re-preflighted or discarded.
 - Deferred cleanup covers normal success, failure, cancellation, timeout, and
   process-start paths. A forced Rehearse process termination can bypass defers;
   durable attribution and restart reconciliation of orphaned credential files

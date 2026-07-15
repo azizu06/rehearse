@@ -1,8 +1,10 @@
 package restic
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
+	"io"
 	"strings"
 	"testing"
 )
@@ -81,6 +83,9 @@ func FuzzValidateStructuredExit(f *testing.F) {
 	f.Fuzz(func(t *testing.T, data []byte) {
 		err := validateStructuredExit(data, 12)
 		if err == nil {
+			if !independentlyValidStructuredExit(data, 12) {
+				t.Fatalf("structured-exit parser accepted input rejected by independent JSON oracle: %q", data)
+			}
 			return
 		}
 		if !errors.Is(err, errInvalidStructuredExit) && !errors.Is(err, errInconsistentExitCode) && !errors.Is(err, errMissingStructuredExit) {
@@ -90,4 +95,38 @@ func FuzzValidateStructuredExit(f *testing.F) {
 			t.Fatalf("private marker leaked through error: %v", err)
 		}
 	})
+}
+
+// independentlyValidStructuredExit intentionally shares no production parser
+// helpers or structs. It is the fuzz oracle for the accepted JSON-line shape.
+func independentlyValidStructuredExit(data []byte, expectedCode int64) bool {
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	decoder.UseNumber()
+	exitErrorSeen := false
+	for {
+		var object map[string]any
+		err := decoder.Decode(&object)
+		if errors.Is(err, io.EOF) {
+			return exitErrorSeen
+		}
+		if err != nil || object == nil {
+			return false
+		}
+		messageType, ok := object["message_type"].(string)
+		if !ok {
+			return false
+		}
+		if messageType != "exit_error" {
+			continue
+		}
+		code, ok := object["code"].(json.Number)
+		if !ok {
+			return false
+		}
+		value, err := code.Int64()
+		if err != nil || value != expectedCode {
+			return false
+		}
+		exitErrorSeen = true
+	}
 }

@@ -62,7 +62,7 @@ make static
 make build
 ```
 
-`make test-adapters` exercises real local and S3-compatible restic repositories. It requires restic 0.18.0 or newer plus a Docker-compatible runtime for the Testcontainers-managed S3 service. Use `make test-adapters-race` to run the same boundary checks with Go's race detector.
+`make test-adapters` exercises real local and S3-compatible restic repositories. It requires restic 0.18.0 or newer plus a Docker-compatible runtime for the Testcontainers-managed S3 service. Orchestration must successfully preflight every newly configured adapter instance before listing or acquisition. Use `make test-adapters-race` to run the same boundary checks with Go's race detector.
 
 `make security` adds `govulncheck` plus a pinned Trivy filesystem scan. It requires Trivy 0.72.0 on `PATH`, or `TRIVY=/path/to/trivy`; CI installs the same scanner version.
 

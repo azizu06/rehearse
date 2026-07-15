@@ -153,6 +153,9 @@ func TestRealResticLocalFailurePathsAreTypedRedactedAndClean(t *testing.T) {
 			if err != nil {
 				t.Fatalf("new adapter: %v", err)
 			}
+			if _, err := adapter.Capabilities(context.Background()); err != nil {
+				t.Fatalf("preflight adapter: %v", err)
+			}
 
 			_, err = adapter.ListRecoveryPoints(context.Background())
 			var failure *source.Failure
@@ -245,6 +248,9 @@ func TestS3CompatibleRepositoryListAndAcquireAreReadOnlyAtTheMinIOBoundary(t *te
 	if err != nil {
 		t.Fatalf("new S3 adapter: %v", err)
 	}
+	if _, err := adapter.Capabilities(ctx); err != nil {
+		t.Fatalf("preflight S3 adapter: %v", err)
+	}
 	points, err := adapter.ListRecoveryPoints(ctx)
 	if err != nil {
 		t.Fatalf("list S3 recovery points: %v", err)
@@ -295,6 +301,9 @@ func TestS3CompatibleRepositoryListAndAcquireAreReadOnlyAtTheMinIOBoundary(t *te
 	}))
 	if err != nil {
 		t.Fatalf("new failing S3 adapter: %v", err)
+	}
+	if _, err := failureAdapter.Capabilities(ctx); err != nil {
+		t.Fatalf("preflight failing S3 adapter: %v", err)
 	}
 	failureCtx, cancelFailure := context.WithTimeout(ctx, 2*time.Second)
 	defer cancelFailure()
