@@ -42,10 +42,11 @@ type Cleaner struct {
 }
 
 type cleaner struct {
-	command      dockerCommand
-	waiter       contextWaiter
-	quiescence   time.Duration
-	snapshotRoot string
+	command        dockerCommand
+	waiter         contextWaiter
+	quiescence     time.Duration
+	snapshotRoot   string
+	removeSnapshot func(string, identity) error
 }
 
 // NewCleaner constructs a label-scoped startup reconciliation cleaner.
@@ -55,7 +56,7 @@ func NewCleaner(options CleanerOptions) *Cleaner {
 		temporaryRoot = os.TempDir()
 	}
 	return &Cleaner{
-		cleaner: cleaner{command: newCommandExecutor(options.Binary), waiter: timerWaiter{}, quiescence: cleanupQuiescence, snapshotRoot: filepath.Clean(temporaryRoot)},
+		cleaner: cleaner{command: newCommandExecutor(options.Binary), waiter: timerWaiter{}, quiescence: cleanupQuiescence, snapshotRoot: filepath.Clean(temporaryRoot), removeSnapshot: removeSnapshotDirectory},
 		locker:  newProjectLocker(options.LockRoot),
 	}
 }
@@ -91,7 +92,11 @@ func (cleaner cleaner) cleanup(ctx context.Context, identity identity) error {
 			continue
 		}
 		if emptyObserved {
-			return removeSnapshotDirectory(cleaner.snapshotRoot, identity)
+			removeSnapshot := cleaner.removeSnapshot
+			if removeSnapshot == nil {
+				removeSnapshot = removeSnapshotDirectory
+			}
+			return removeSnapshot(cleaner.snapshotRoot, identity)
 		}
 		emptyObserved = true
 		if err := cleaner.waiter.wait(ctx, cleaner.quiescence); err != nil {

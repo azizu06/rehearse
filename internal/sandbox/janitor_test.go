@@ -43,11 +43,11 @@ func TestJanitorRetriesFailedCleanupUntilItSucceeds(t *testing.T) {
 
 	cleaner := &sequencedCleaner{errors: []error{errors.New("Docker unavailable"), nil}}
 	clock := &sequenceClock{next: startedAt.Add(time.Hour)}
-	janitor := sandbox.NewJanitor(store, cleaner, sandbox.JanitorOptions{
+	options := sandbox.JanitorOptions{
 		CleanupTimeout: time.Second,
 		Now:            clock.Now,
-	})
-	if err := janitor.Reconcile(ctx); err == nil {
+	}
+	if err := sandbox.ReconcileStartup(ctx, store, cleaner, options); err == nil {
 		t.Fatal("first reconciliation succeeded despite cleanup failure")
 	}
 	failed, err := store.Run(ctx, "run-janitor")
@@ -58,7 +58,7 @@ func TestJanitorRetriesFailedCleanupUntilItSucceeds(t *testing.T) {
 		t.Fatalf("failed reconciliation projection = %#v", failed)
 	}
 
-	if err := janitor.Reconcile(ctx); err != nil {
+	if err := sandbox.ReconcileStartup(ctx, store, cleaner, options); err != nil {
 		t.Fatalf("second reconciliation: %v", err)
 	}
 	completed, err := store.Run(ctx, "run-janitor")

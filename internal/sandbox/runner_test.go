@@ -7,8 +7,11 @@ import (
 	"path/filepath"
 	"reflect"
 	"strings"
+	"sync"
 	"testing"
 	"time"
+
+	"github.com/azizu06/rehearse/internal/drill"
 )
 
 func TestRunnerUsesShellFreeNoBuildNoPullAndFreshCleanupContext(t *testing.T) {
@@ -17,6 +20,7 @@ func TestRunnerUsesShellFreeNoBuildNoPullAndFreshCleanupContext(t *testing.T) {
 	runner := &DockerRunner{
 		command:       command,
 		cleaner:       cleaner{command: command, waiter: &recordingWaiter{}, quiescence: cleanupQuiescence},
+		journal:       &recordingCleanupJournal{},
 		locker:        newProjectLocker(t.TempDir()),
 		temporaryRoot: t.TempDir(), cleanupTimeout: time.Second,
 	}
@@ -102,6 +106,7 @@ func TestRunnerRemovesSnapshotAndCleansAfterStartBoundaryErrors(t *testing.T) {
 			runner := &DockerRunner{
 				command: command,
 				cleaner: cleaner{command: command, waiter: &recordingWaiter{}, quiescence: cleanupQuiescence, snapshotRoot: root},
+				journal: &recordingCleanupJournal{},
 				locker:  newProjectLocker(filepath.Join(root, "locks")), temporaryRoot: root, cleanupTimeout: time.Second,
 			}
 			request := Request{
@@ -120,6 +125,131 @@ func TestRunnerRemovesSnapshotAndCleansAfterStartBoundaryErrors(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestRunnerEnforcesDurationWithoutCallbackCooperation(t *testing.T) {
+	release := make(chan struct{})
+	command := &runnerDocker{}
+	runner := testRunner(t, command, &recordingCleanupJournal{})
+	request := testRunnerRequest("run-uncooperative-timeout", 20*time.Millisecond)
+	started := time.Now()
+	_, err := runner.Run(context.Background(), request, func(context.Context, Instance) error {
+		<-release
+		return nil
+	})
+	close(release)
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("Run error = %v, want context deadline", err)
+	}
+	if elapsed := time.Since(started); elapsed > time.Second {
+		t.Fatalf("Run waited %s for an uncooperative callback", elapsed)
+	}
+	if !command.cleanupObserved {
+		t.Fatal("runner skipped cleanup after independent timeout")
+	}
+}
+
+func TestRunnerCleansAndRecordsBeforeRepanicking(t *testing.T) {
+	command := &runnerDocker{}
+	journal := &recordingCleanupJournal{}
+	runner := testRunner(t, command, journal)
+	panicValue := errors.New("callback panic")
+	var recovered any
+	func() {
+		defer func() { recovered = recover() }()
+		_, _ = runner.Run(context.Background(), testRunnerRequest("run-panic", time.Minute), func(context.Context, Instance) error {
+			panic(panicValue)
+		})
+	}()
+	if recovered != panicValue {
+		t.Fatalf("recovered panic = %v, want %v", recovered, panicValue)
+	}
+	if !command.cleanupObserved {
+		t.Fatal("runner skipped cleanup after callback panic")
+	}
+	if got := journal.lastStatus(); got != drill.CleanupSucceeded {
+		t.Fatalf("recorded cleanup = %q, want succeeded", got)
+	}
+}
+
+func TestRunnerDurablyRecordsSnapshotDeletionFailure(t *testing.T) {
+	root := t.TempDir()
+	command := &runnerDocker{}
+	journal := &recordingCleanupJournal{}
+	wantErr := errors.New("remove snapshot failed")
+	runner := &DockerRunner{
+		command: command,
+		cleaner: cleaner{
+			command: command, waiter: &recordingWaiter{}, quiescence: cleanupQuiescence,
+			snapshotRoot: root, removeSnapshot: func(string, identity) error { return wantErr },
+		},
+		journal: journal, locker: newProjectLocker(filepath.Join(root, "locks")),
+		temporaryRoot: root, cleanupTimeout: time.Second,
+	}
+	_, err := runner.Run(context.Background(), testRunnerRequest("run-snapshot-delete", time.Minute), func(context.Context, Instance) error { return nil })
+	if !errors.Is(err, wantErr) {
+		t.Fatalf("Run error = %v, want snapshot deletion failure", err)
+	}
+	if got := journal.lastStatus(); got != drill.CleanupFailed {
+		t.Fatalf("recorded cleanup = %q, want failed", got)
+	}
+}
+
+func TestRunnerRejectsRunsWithoutDurableOwnershipBeforeDocker(t *testing.T) {
+	command := &runnerDocker{}
+	wantErr := errors.New("run not persisted")
+	runner := testRunner(t, command, &recordingCleanupJournal{claimErr: wantErr})
+	_, err := runner.Run(context.Background(), testRunnerRequest("run-missing", time.Minute), func(context.Context, Instance) error { return nil })
+	if !errors.Is(err, wantErr) {
+		t.Fatalf("Run error = %v, want durable ownership failure", err)
+	}
+	if command.configCalls != 0 {
+		t.Fatalf("Docker config calls = %d, want zero", command.configCalls)
+	}
+}
+
+func testRunner(t *testing.T, command *runnerDocker, journal CleanupJournal) *DockerRunner {
+	t.Helper()
+	root := t.TempDir()
+	return &DockerRunner{
+		command: command,
+		cleaner: cleaner{command: command, waiter: &recordingWaiter{}, quiescence: cleanupQuiescence, snapshotRoot: root},
+		journal: journal, locker: newProjectLocker(filepath.Join(root, "locks")),
+		temporaryRoot: root, cleanupTimeout: time.Second,
+	}
+}
+
+func testRunnerRequest(runID string, duration time.Duration) Request {
+	return Request{
+		RunID: runID, ComposeFiles: []string{"testdata/compose.yaml"},
+		Limits: Limits{CPUs: "0.5", MemoryBytes: 32 << 20, PIDs: 16, Duration: duration, OutputBytes: 4096},
+	}
+}
+
+type recordingCleanupJournal struct {
+	mu       sync.Mutex
+	claimErr error
+	statuses []drill.CleanupStatus
+}
+
+func (journal *recordingCleanupJournal) ClaimSandboxCleanup(context.Context, string, time.Time) error {
+	return journal.claimErr
+}
+
+func (journal *recordingCleanupJournal) RecordSandboxCleanup(_ context.Context, _ string, status drill.CleanupStatus, _ time.Time) error {
+	journal.mu.Lock()
+	defer journal.mu.Unlock()
+	journal.statuses = append(journal.statuses, status)
+	return nil
+}
+
+func (journal *recordingCleanupJournal) lastStatus() drill.CleanupStatus {
+	journal.mu.Lock()
+	defer journal.mu.Unlock()
+	if len(journal.statuses) == 0 {
+		return ""
+	}
+	return journal.statuses[len(journal.statuses)-1]
 }
 
 func containsSequence(values []string, sequence ...string) bool {

@@ -22,6 +22,7 @@ func TestRunnerExecutesTheExactValidatedSnapshotAfterInputsMutate(t *testing.T) 
 	runner := &DockerRunner{
 		command: command,
 		cleaner: cleaner{command: command, waiter: &recordingWaiter{}, quiescence: cleanupQuiescence, snapshotRoot: root},
+		journal: &recordingCleanupJournal{},
 		locker:  newProjectLocker(filepath.Join(root, "locks")), temporaryRoot: root, cleanupTimeout: time.Second,
 	}
 	request := Request{

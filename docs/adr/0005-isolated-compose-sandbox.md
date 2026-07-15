@@ -63,6 +63,10 @@ recorded as retryable cleanup failure.
 
 The startup janitor consumes Issue #6's durable queue:
 `needs_reconciliation = 1 OR cleanup_status IN ('pending', 'failed')`.
+Before any Docker command can create resources, the runner adds a one-shot
+cleanup claim for an existing durable run. Pending or failed claims join the
+same startup queue; successful cleanup closes the claim without permitting a
+second sandbox lifecycle for that run.
 `cleanup_failed` remains queued; `BeginCleanupRetry` moves only cleanup back to
 pending and appends immutable reconciliation evidence. Only
 `cleanup_succeeded` clears reconciliation ownership.

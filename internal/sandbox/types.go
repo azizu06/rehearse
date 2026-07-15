@@ -3,6 +3,7 @@
 package sandbox
 
 import (
+	"context"
 	"crypto/sha256"
 	"errors"
 	"fmt"
@@ -13,6 +14,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/azizu06/rehearse/internal/drill"
 )
 
 const (
@@ -66,9 +69,17 @@ type Result = Instance
 // DockerRunnerOptions configure the trusted local Docker CLI boundary.
 type DockerRunnerOptions struct {
 	Binary         string
+	CleanupJournal CleanupJournal
 	TemporaryRoot  string
 	LockRoot       string
 	CleanupTimeout time.Duration
+}
+
+// CleanupJournal is the narrow durable ownership seam shared with startup
+// reconciliation.
+type CleanupJournal interface {
+	ClaimSandboxCleanup(context.Context, string, time.Time) error
+	RecordSandboxCleanup(context.Context, string, drill.CleanupStatus, time.Time) error
 }
 
 // CleanerOptions configure standalone startup reconciliation cleanup.

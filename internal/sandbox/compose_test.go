@@ -1,6 +1,7 @@
 package sandbox
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -47,12 +48,63 @@ func TestComposeSafetyRejectsEscapeAndUnboundedFeatures(t *testing.T) {
 		{name: "service static IP", model: `{"services":{"worker":{"image":"alpine","networks":{"default":{"ipv4_address":"10.0.0.2"}}}},"networks":{"default":{}}}`},
 		{name: "attachable network", model: `{"services":{"worker":{"image":"alpine","networks":{"default":null}}},"networks":{"default":{"attachable":true}}}`},
 		{name: "custom IPAM", model: `{"services":{"worker":{"image":"alpine","networks":{"default":null}}},"networks":{"default":{"ipam":{"config":[{"subnet":"10.0.0.0/24"}]}}}}`},
+		{name: "unknown top-level field", model: `{"services":{"worker":{"image":"alpine"}},"future_escape":true}`},
+		{name: "unknown service field", model: `{"services":{"worker":{"image":"alpine","future_escape":true}}}`},
+		{name: "unknown deploy field", model: `{"services":{"worker":{"image":"alpine","deploy":{"future_escape":true}}}}`},
+		{name: "unknown mount field", model: `{"services":{"worker":{"image":"alpine","volumes":[{"type":"tmpfs","target":"/run","future_escape":true}]}}}`},
+		{name: "long-form tmpfs policy", model: `{"services":{"worker":{"image":"alpine","volumes":[{"type":"tmpfs","target":"/run","tmpfs":{"size":1024,"mode":448}}]}}}`},
+		{name: "unknown service network field", model: `{"services":{"worker":{"image":"alpine","networks":{"default":{"future_escape":true}}}},"networks":{"default":{}}}`},
+		{name: "unknown resource field", model: `{"services":{"worker":{"image":"alpine"}},"volumes":{"data":{"future_escape":true}}}`},
+		{name: "unknown logging field", model: `{"services":{"worker":{"image":"alpine","logging":{"driver":"local","future_escape":true}}}}`},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			if _, err := parseAndValidateCompose([]byte(test.model), identity); !errors.Is(err, ErrUnsafeCompose) {
 				t.Fatalf("parseAndValidateCompose error = %v, want ErrUnsafeCompose", err)
 			}
+		})
+	}
+}
+
+func TestExecutionSnapshotRejectsNonGeneratedResourceFields(t *testing.T) {
+	identity, _ := newIdentity("run-final-policy")
+	limits := Limits{CPUs: "0.5", MemoryBytes: 32 << 20, PIDs: 16, OutputBytes: 4096}
+	model, err := parseAndValidateCompose([]byte(`{"services":{"worker":{"image":"alpine"}}}`), identity)
+	if err != nil {
+		t.Fatalf("parseAndValidateCompose: %v", err)
+	}
+	override, err := buildOverride(model, identity, limits)
+	if err != nil {
+		t.Fatalf("buildOverride: %v", err)
+	}
+	data, err := encodeOverride(override)
+	if err != nil {
+		t.Fatalf("encodeOverride: %v", err)
+	}
+	var snapshot map[string]any
+	if err := json.Unmarshal(data, &snapshot); err != nil {
+		t.Fatalf("decode snapshot: %v", err)
+	}
+	service := snapshot["services"].(map[string]any)["worker"].(map[string]any)
+	for _, mutation := range []struct {
+		name  string
+		field string
+		value any
+	}{
+		{name: "positive CPU quota", field: "cpu_quota", value: 50000},
+		{name: "zero CPU quota", field: "cpu_quota", value: 0},
+		{name: "zero swap policy", field: "memswap_limit", value: 0},
+	} {
+		t.Run(mutation.name, func(t *testing.T) {
+			service[mutation.field] = mutation.value
+			data, err := json.Marshal(snapshot)
+			if err != nil {
+				t.Fatalf("encode snapshot mutation: %v", err)
+			}
+			if _, err := parseAndValidateSnapshot(data, identity, limits); !errors.Is(err, ErrUnsafeCompose) {
+				t.Fatalf("parseAndValidateSnapshot error = %v, want ErrUnsafeCompose", err)
+			}
+			delete(service, mutation.field)
 		})
 	}
 }

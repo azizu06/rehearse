@@ -24,6 +24,7 @@ func TestDockerRunnerAppliesIsolationLabelsAndResourceLimits(t *testing.T) {
 
 	runner := sandbox.NewDockerRunner(sandbox.DockerRunnerOptions{
 		Binary:         "docker",
+		CleanupJournal: newCleanupJournal(t, "integration-run-limits"),
 		TemporaryRoot:  t.TempDir(),
 		CleanupTimeout: 15 * time.Second,
 	})
@@ -183,6 +184,7 @@ func TestDockerRunnerCleansAfterCancellation(t *testing.T) {
 
 	runner := sandbox.NewDockerRunner(sandbox.DockerRunnerOptions{
 		Binary:         "docker",
+		CleanupJournal: newCleanupJournal(t, "integration-run-cancelled"),
 		TemporaryRoot:  t.TempDir(),
 		LockRoot:       t.TempDir(),
 		CleanupTimeout: 5 * time.Second,
@@ -210,7 +212,7 @@ func TestDockerRunnerCleansAfterCallbackFailure(t *testing.T) {
 	requireDockerIntegration(t)
 
 	runner := sandbox.NewDockerRunner(sandbox.DockerRunnerOptions{
-		Binary: "docker", TemporaryRoot: t.TempDir(), LockRoot: t.TempDir(), CleanupTimeout: 5 * time.Second,
+		Binary: "docker", CleanupJournal: newCleanupJournal(t, "integration-run-failed"), TemporaryRoot: t.TempDir(), LockRoot: t.TempDir(), CleanupTimeout: 5 * time.Second,
 	})
 	request := sandbox.Request{
 		RunID: "integration-run-failed", ComposeFiles: []string{filepath.Join("testdata", "compose.yaml")},
@@ -228,7 +230,7 @@ func TestDockerRunnerEnforcesTimeLimitAndCleans(t *testing.T) {
 	requireDockerIntegration(t)
 
 	runner := sandbox.NewDockerRunner(sandbox.DockerRunnerOptions{
-		Binary: "docker", TemporaryRoot: t.TempDir(), LockRoot: t.TempDir(), CleanupTimeout: 5 * time.Second,
+		Binary: "docker", CleanupJournal: newCleanupJournal(t, "integration-run-timeout"), TemporaryRoot: t.TempDir(), LockRoot: t.TempDir(), CleanupTimeout: 5 * time.Second,
 	})
 	request := sandbox.Request{
 		RunID: "integration-run-timeout", ComposeFiles: []string{filepath.Join("testdata", "compose.yaml")},
@@ -253,6 +255,7 @@ func TestDockerRunnerNamesDoNotCollideAcrossConcurrentRuns(t *testing.T) {
 	release := make(chan struct{})
 	errorsSeen := make(chan error, 2)
 	projects := make(chan string, 2)
+	cleanupJournal := newCleanupJournal(t, "integration-concurrent-a", "integration-concurrent-b")
 	var wait sync.WaitGroup
 	for _, runID := range []string{"integration-concurrent-a", "integration-concurrent-b"} {
 		runID := runID
@@ -260,7 +263,7 @@ func TestDockerRunnerNamesDoNotCollideAcrossConcurrentRuns(t *testing.T) {
 		go func() {
 			defer wait.Done()
 			runner := sandbox.NewDockerRunner(sandbox.DockerRunnerOptions{
-				Binary: "docker", TemporaryRoot: root, LockRoot: lockRoot, CleanupTimeout: 5 * time.Second,
+				Binary: "docker", CleanupJournal: cleanupJournal, TemporaryRoot: root, LockRoot: lockRoot, CleanupTimeout: 5 * time.Second,
 			})
 			request := sandbox.Request{
 				RunID: runID, ComposeFiles: []string{filepath.Join("testdata", "compose.yaml")},
@@ -396,7 +399,7 @@ func TestDockerRunnerForcedKillHelper(t *testing.T) {
 	}
 	runner := sandbox.NewDockerRunner(sandbox.DockerRunnerOptions{
 		Binary: "docker", TemporaryRoot: filepath.Dir(os.Getenv("REHEARSE_FORCE_KILL_READY")),
-		LockRoot: os.Getenv("REHEARSE_FORCE_KILL_LOCKS"), CleanupTimeout: 10 * time.Second,
+		CleanupJournal: store, LockRoot: os.Getenv("REHEARSE_FORCE_KILL_LOCKS"), CleanupTimeout: 10 * time.Second,
 	})
 	request := sandbox.Request{
 		RunID: runID, ComposeFiles: []string{os.Getenv("REHEARSE_FORCE_KILL_COMPOSE")},
@@ -418,6 +421,30 @@ func mustWorkingDirectory(t *testing.T) string {
 		t.Fatalf("Getwd: %v", err)
 	}
 	return directory
+}
+
+func newCleanupJournal(t *testing.T, runIDs ...string) *journal.Store {
+	t.Helper()
+	ctx := context.Background()
+	store, err := journal.Open(ctx, filepath.Join(t.TempDir(), "rehearse.db"))
+	if err != nil {
+		t.Fatalf("open cleanup journal: %v", err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	now := time.Now().UTC()
+	plan := drill.Plan{
+		ID: "sandbox-plan", Name: "sandbox integration plan", Version: 1, CreatedAt: now,
+		Spec: drill.PlanSpec{SourceKind: "source", TargetKind: "target"},
+	}
+	if err := store.CreatePlan(ctx, plan); err != nil {
+		t.Fatalf("create cleanup plan: %v", err)
+	}
+	for index, runID := range runIDs {
+		if _, err := store.CreateRun(ctx, runID, plan.ID, plan.Version, now.Add(time.Duration(index)*time.Nanosecond)); err != nil {
+			t.Fatalf("create cleanup run %q: %v", runID, err)
+		}
+	}
+	return store
 }
 
 func requireDockerIntegration(t *testing.T) {

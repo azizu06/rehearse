@@ -50,6 +50,11 @@ func NewJanitor(store ReconciliationStore, cleaner RunCleaner, options JanitorOp
 	return &Janitor{store: store, cleaner: cleaner, cleanupTimeout: timeout, now: now}
 }
 
+// ReconcileStartup is the application-startup integration seam for Issue #11.
+func ReconcileStartup(ctx context.Context, store ReconciliationStore, cleaner RunCleaner, options JanitorOptions) error {
+	return NewJanitor(store, cleaner, options).Reconcile(ctx)
+}
+
 // Reconcile attempts every queued run and leaves failures durably retryable.
 func (janitor *Janitor) Reconcile(ctx context.Context) error {
 	if janitor.store == nil || janitor.cleaner == nil {

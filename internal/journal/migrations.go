@@ -13,7 +13,7 @@ import (
 )
 
 // CurrentSchemaVersion is the newest embedded SQLite migration.
-const CurrentSchemaVersion = 1
+const CurrentSchemaVersion = 2
 
 //go:embed migrations/*.sql
 var migrationFiles embed.FS

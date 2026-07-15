@@ -224,6 +224,46 @@ func TestCleanupFailureRemainsInDurableReconciliationQueueAcrossRestarts(t *test
 	}
 }
 
+func TestSandboxCleanupClaimRequiresOneDurableRunAndQueuesFailures(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	now := time.Date(2026, time.July, 15, 18, 0, 0, 0, time.UTC)
+	store, _, run := createPlanAndRun(t, ctx, filepath.Join(t.TempDir(), "rehearse.db"), now)
+	t.Cleanup(func() { _ = store.Close() })
+
+	if err := store.ClaimSandboxCleanup(ctx, "missing-run", now); !errors.Is(err, journal.ErrNotFound) {
+		t.Fatalf("ClaimSandboxCleanup(missing) error = %v, want ErrNotFound", err)
+	}
+	if err := store.ClaimSandboxCleanup(ctx, run.ID, now.Add(time.Second)); err != nil {
+		t.Fatalf("ClaimSandboxCleanup: %v", err)
+	}
+	if err := store.ClaimSandboxCleanup(ctx, run.ID, now.Add(2*time.Second)); !errors.Is(err, journal.ErrSandboxClaimed) {
+		t.Fatalf("second ClaimSandboxCleanup error = %v, want ErrSandboxClaimed", err)
+	}
+	queued, err := store.RunsNeedingReconciliation(ctx)
+	if err != nil || len(queued) != 1 || queued[0].ID != run.ID {
+		t.Fatalf("claimed cleanup queue = %#v, error %v", queued, err)
+	}
+	if err := store.RecordSandboxCleanup(ctx, run.ID, drill.CleanupFailed, now.Add(3*time.Second)); err != nil {
+		t.Fatalf("RecordSandboxCleanup(failed): %v", err)
+	}
+	queued, err = store.RunsNeedingReconciliation(ctx)
+	if err != nil || len(queued) != 1 {
+		t.Fatalf("failed cleanup queue = %#v, error %v", queued, err)
+	}
+	if err := store.RecordSandboxCleanup(ctx, run.ID, drill.CleanupSucceeded, now.Add(4*time.Second)); err != nil {
+		t.Fatalf("RecordSandboxCleanup(succeeded): %v", err)
+	}
+	queued, err = store.RunsNeedingReconciliation(ctx)
+	if err != nil || len(queued) != 0 {
+		t.Fatalf("successful cleanup queue = %#v, error %v", queued, err)
+	}
+	if err := store.ClaimSandboxCleanup(ctx, run.ID, now.Add(5*time.Second)); !errors.Is(err, journal.ErrSandboxClaimed) {
+		t.Fatalf("post-success ClaimSandboxCleanup error = %v, want ErrSandboxClaimed", err)
+	}
+}
+
 func TestRestartPreservesImmutablePlanVersionHistory(t *testing.T) {
 	t.Parallel()
 

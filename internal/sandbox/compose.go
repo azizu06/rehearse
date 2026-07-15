@@ -1,8 +1,11 @@
 package sandbox
 
 import (
+	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"os"
 	"strconv"
 	"strings"
@@ -12,6 +15,7 @@ const maxComposeResources = 64
 
 type composeModel struct {
 	Name     string                     `json:"name"`
+	Version  string                     `json:"version"`
 	Services map[string]composeService  `json:"services"`
 	Networks map[string]composeResource `json:"networks"`
 	Volumes  map[string]composeResource `json:"volumes"`
@@ -26,6 +30,7 @@ type composeService struct {
 	CapAdd         []string                          `json:"cap_add"`
 	Cgroup         string                            `json:"cgroup"`
 	CgroupParent   string                            `json:"cgroup_parent"`
+	Command        json.RawMessage                   `json:"command"`
 	CPUCount       json.RawMessage                   `json:"cpu_count"`
 	CPUPercent     json.RawMessage                   `json:"cpu_percent"`
 	CPUPeriod      json.RawMessage                   `json:"cpu_period"`
@@ -39,18 +44,24 @@ type composeService struct {
 	Configs        []json.RawMessage                 `json:"configs"`
 	ContainerName  string                            `json:"container_name"`
 	Deploy         *composeDeploy                    `json:"deploy"`
+	DependsOn      map[string]composeDependency      `json:"depends_on"`
 	Devices        []json.RawMessage                 `json:"devices"`
 	DeviceCgroups  []string                          `json:"device_cgroup_rules"`
 	DNS            json.RawMessage                   `json:"dns"`
 	DNSOptions     json.RawMessage                   `json:"dns_opt"`
 	DNSSearch      json.RawMessage                   `json:"dns_search"`
 	DomainName     string                            `json:"domainname"`
+	Entrypoint     json.RawMessage                   `json:"entrypoint"`
+	Environment    json.RawMessage                   `json:"environment"`
 	EnvFile        json.RawMessage                   `json:"env_file"`
 	ExtraHosts     []json.RawMessage                 `json:"extra_hosts"`
 	ExternalLinks  []string                          `json:"external_links"`
 	GPUs           json.RawMessage                   `json:"gpus"`
 	GroupAdd       []string                          `json:"group_add"`
+	Healthcheck    *composeHealthcheck               `json:"healthcheck"`
 	Hostname       string                            `json:"hostname"`
+	Image          string                            `json:"image"`
+	Init           *bool                             `json:"init"`
 	Ipc            string                            `json:"ipc"`
 	Isolation      string                            `json:"isolation"`
 	Links          []string                          `json:"links"`
@@ -72,9 +83,12 @@ type composeService struct {
 	Ports          []json.RawMessage                 `json:"ports"`
 	PostStart      json.RawMessage                   `json:"post_start"`
 	PreStop        json.RawMessage                   `json:"pre_stop"`
+	Platform       string                            `json:"platform"`
 	Privileged     bool                              `json:"privileged"`
+	Profiles       []string                          `json:"profiles"`
 	Provider       json.RawMessage                   `json:"provider"`
 	PullPolicy     string                            `json:"pull_policy"`
+	ReadOnly       bool                              `json:"read_only"`
 	Restart        string                            `json:"restart"`
 	Runtime        string                            `json:"runtime"`
 	Scale          *int                              `json:"scale"`
@@ -82,14 +96,36 @@ type composeService struct {
 	SecurityOpt    []string                          `json:"security_opt"`
 	ShmSize        json.RawMessage                   `json:"shm_size"`
 	StorageOpt     map[string]string                 `json:"storage_opt"`
+	StdinOpen      bool                              `json:"stdin_open"`
+	StopGrace      json.RawMessage                   `json:"stop_grace_period"`
+	StopSignal     string                            `json:"stop_signal"`
 	Sysctls        map[string]string                 `json:"sysctls"`
 	Ulimits        json.RawMessage                   `json:"ulimits"`
 	Tmpfs          json.RawMessage                   `json:"tmpfs"`
+	Tty            bool                              `json:"tty"`
 	UseAPISocket   bool                              `json:"use_api_socket"`
+	User           string                            `json:"user"`
 	UsernsMode     string                            `json:"userns_mode"`
 	Uts            string                            `json:"uts"`
 	Volumes        []composeMount                    `json:"volumes"`
 	VolumesFrom    []string                          `json:"volumes_from"`
+	WorkingDir     string                            `json:"working_dir"`
+}
+
+type composeDependency struct {
+	Condition string `json:"condition"`
+	Required  bool   `json:"required"`
+	Restart   bool   `json:"restart"`
+}
+
+type composeHealthcheck struct {
+	Disable       bool            `json:"disable"`
+	Interval      json.RawMessage `json:"interval"`
+	Retries       int             `json:"retries"`
+	StartInterval json.RawMessage `json:"start_interval"`
+	StartPeriod   json.RawMessage `json:"start_period"`
+	Test          json.RawMessage `json:"test"`
+	Timeout       json.RawMessage `json:"timeout"`
 }
 
 type composeDeploy struct {
@@ -114,9 +150,16 @@ type composeServiceNetwork struct {
 }
 
 type composeMount struct {
-	Type   string `json:"type"`
-	Source string `json:"source"`
-	Target string `json:"target"`
+	Bind        json.RawMessage `json:"bind"`
+	Cluster     json.RawMessage `json:"cluster"`
+	Consistency string          `json:"consistency"`
+	Image       json.RawMessage `json:"image"`
+	ReadOnly    bool            `json:"read_only"`
+	Source      string          `json:"source"`
+	Target      string          `json:"target"`
+	Tmpfs       json.RawMessage `json:"tmpfs"`
+	Type        string          `json:"type"`
+	Volume      json.RawMessage `json:"volume"`
 }
 
 type composeResource struct {
@@ -188,8 +231,8 @@ func parseAndValidateSnapshot(data []byte, identity identity, limits Limits) (co
 
 func parseAndValidateComposeMode(data []byte, identity identity, enforced *Limits) (composeModel, error) {
 	var model composeModel
-	if err := json.Unmarshal(data, &model); err != nil {
-		return composeModel{}, fmt.Errorf("parse resolved Compose model: %w", err)
+	if err := decodeStrictJSON(data, &model); err != nil {
+		return composeModel{}, fmt.Errorf("%w: parse resolved Compose model: %v", ErrUnsafeCompose, err)
 	}
 	if len(model.Services) == 0 || len(model.Services) > maxComposeResources {
 		return composeModel{}, fmt.Errorf("%w: Compose must define one to %d services", ErrUnsafeCompose, maxComposeResources)
@@ -221,7 +264,7 @@ func parseAndValidateComposeMode(data []byte, identity identity, enforced *Limit
 			return composeModel{}, unsafeService(name, "non-replicated deploy modes are not allowed")
 		case service.Deploy != nil && (rawSet(service.Deploy.Labels) || rawSet(service.Deploy.Placement) || rawSet(service.Deploy.RollbackConfig) || rawSet(service.Deploy.UpdateConfig) || service.Deploy.EndpointMode != ""):
 			return composeModel{}, unsafeService(name, "deploy placement and rollout policy is not allowed")
-		case enforced == nil && service.Deploy != nil && rawSet(service.Deploy.Resources):
+		case enforced == nil && service.Deploy != nil && rawPresent(service.Deploy.Resources):
 			return composeModel{}, unsafeService(name, "caller-supplied deploy resources are not allowed")
 		case service.Privileged:
 			return composeModel{}, unsafeService(name, "privileged containers are not allowed")
@@ -275,6 +318,8 @@ func parseAndValidateComposeMode(data []byte, identity identity, enforced *Limit
 			return composeModel{}, unsafeService(name, "pull and restart policy is owned by the Rehearse runner")
 		case enforced == nil && service.hasCallerResourceLimits():
 			return composeModel{}, unsafeService(name, "resource limits are owned by the Rehearse runner")
+		case enforced != nil && service.hasNonGeneratedResourceLimits():
+			return composeModel{}, unsafeService(name, "non-generated resource limits are not allowed in the execution snapshot")
 		case service.Hostname != "" && !dnsLabelPattern.MatchString(service.Hostname):
 			return composeModel{}, unsafeService(name, "hostname must be one RFC 1123 label of at most 63 characters")
 		}
@@ -297,6 +342,9 @@ func parseAndValidateComposeMode(data []byte, identity identity, enforced *Limit
 			}
 		}
 		for _, mount := range service.Volumes {
+			if rawSet(mount.Bind) || rawSet(mount.Cluster) || rawSet(mount.Image) || rawSet(mount.Tmpfs) || rawSet(mount.Volume) || mount.Consistency != "" {
+				return composeModel{}, unsafeService(name, "caller-supplied mount policy is not allowed")
+			}
 			switch mount.Type {
 			case "volume":
 				if mount.Source == "" {
@@ -480,10 +528,36 @@ func buildOverride(model composeModel, identity identity, limits Limits) (compos
 }
 
 func (service composeService) hasCallerResourceLimits() bool {
-	return rawSet(service.CPUCount) || rawSet(service.CPUPercent) || rawSet(service.CPUPeriod) ||
-		rawSet(service.CPUQuota) || rawSet(service.CPURTRuntime) || rawSet(service.CPURTPeriod) || rawSet(service.CPUShares) || rawSet(service.CPUSet) || rawSet(service.CPUs) ||
-		rawSet(service.MemLimit) || rawSet(service.MemReservation) || rawSet(service.MemSwapLimit) ||
-		rawSet(service.MemSwappiness) || rawSet(service.PidsLimit)
+	return rawPresent(service.CPUCount) || rawPresent(service.CPUPercent) || rawPresent(service.CPUPeriod) ||
+		rawPresent(service.CPUQuota) || rawPresent(service.CPURTRuntime) || rawPresent(service.CPURTPeriod) || rawPresent(service.CPUShares) || rawPresent(service.CPUSet) || rawPresent(service.CPUs) ||
+		rawPresent(service.MemLimit) || rawPresent(service.MemReservation) || rawPresent(service.MemSwapLimit) ||
+		rawPresent(service.MemSwappiness) || rawPresent(service.PidsLimit)
+}
+
+func (service composeService) hasNonGeneratedResourceLimits() bool {
+	return rawPresent(service.CPUCount) || rawPresent(service.CPUPercent) || rawPresent(service.CPUPeriod) ||
+		rawPresent(service.CPUQuota) || rawPresent(service.CPURTRuntime) || rawPresent(service.CPURTPeriod) || rawPresent(service.CPUShares) || rawPresent(service.CPUSet) ||
+		rawPresent(service.MemReservation) || rawPresent(service.MemSwapLimit) || rawPresent(service.MemSwappiness)
+}
+
+func rawPresent(value json.RawMessage) bool {
+	trimmed := strings.TrimSpace(string(value))
+	return trimmed != "" && trimmed != "null"
+}
+
+func decodeStrictJSON(data []byte, target any) error {
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(target); err != nil {
+		return err
+	}
+	if err := decoder.Decode(&struct{}{}); err != io.EOF {
+		if err == nil {
+			return errors.New("multiple JSON values")
+		}
+		return err
+	}
+	return nil
 }
 
 func rawSet(value json.RawMessage) bool {

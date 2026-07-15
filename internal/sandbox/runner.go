@@ -8,12 +8,15 @@ import (
 	"os"
 	"path/filepath"
 	"time"
+
+	"github.com/azizu06/rehearse/internal/drill"
 )
 
 // DockerRunner owns the Compose CLI, project lock, and label-scoped cleaner.
 type DockerRunner struct {
 	command        dockerCommand
 	cleaner        cleaner
+	journal        CleanupJournal
 	locker         projectLocker
 	temporaryRoot  string
 	cleanupTimeout time.Duration
@@ -34,6 +37,7 @@ func NewDockerRunner(options DockerRunnerOptions) *DockerRunner {
 	return &DockerRunner{
 		command:        command,
 		cleaner:        cleaner{command: command, waiter: timerWaiter{}, quiescence: cleanupQuiescence, snapshotRoot: filepath.Clean(temporaryRoot)},
+		journal:        options.CleanupJournal,
 		locker:         newProjectLocker(options.LockRoot),
 		temporaryRoot:  filepath.Clean(temporaryRoot),
 		cleanupTimeout: cleanupTimeout,
@@ -47,14 +51,18 @@ func (runner *DockerRunner) Run(
 	ctx context.Context,
 	request Request,
 	use func(context.Context, Instance) error,
-) (Result, error) {
+) (result Result, resultErr error) {
 	normalized, err := normalizeRequest(request)
 	if err != nil {
 		return Result{}, err
 	}
 	instance := Instance{RunID: normalized.RunID, ProjectName: normalized.identity.projectName}
+	result = instance
 	if use == nil {
 		return instance, fmt.Errorf("%w: sandbox callback is required", ErrInvalidRequest)
+	}
+	if runner.journal == nil {
+		return instance, fmt.Errorf("%w: durable cleanup journal is required", ErrInvalidRequest)
 	}
 	if info, err := os.Stat(runner.temporaryRoot); err != nil || !info.IsDir() {
 		return instance, fmt.Errorf("%w: temporary root must exist", ErrInvalidRequest)
@@ -64,7 +72,23 @@ func (runner *DockerRunner) Run(
 	if err != nil {
 		return instance, err
 	}
-	defer func() { _ = lock.release() }()
+	defer func() { resultErr = errors.Join(resultErr, lock.release()) }()
+	if err := runner.journal.ClaimSandboxCleanup(ctx, normalized.RunID, time.Now().UTC()); err != nil {
+		return instance, fmt.Errorf("claim durable sandbox cleanup: %w", err)
+	}
+	defer func() {
+		cleanupContext, cleanupCancel := context.WithTimeout(context.WithoutCancel(ctx), runner.cleanupTimeout)
+		cleanupErr := runner.cleaner.cleanup(cleanupContext, normalized.identity)
+		cleanupCancel()
+		status := drill.CleanupSucceeded
+		if cleanupErr != nil {
+			status = drill.CleanupFailed
+		}
+		recordContext, recordCancel := context.WithTimeout(context.WithoutCancel(ctx), runner.cleanupTimeout)
+		recordErr := runner.journal.RecordSandboxCleanup(recordContext, normalized.RunID, status, time.Now().UTC())
+		recordCancel()
+		resultErr = errors.Join(resultErr, cleanupErr, recordErr)
+	}()
 	runContext, cancel := context.WithTimeout(ctx, normalized.Limits.Duration)
 	defer cancel()
 	if err := ensureProjectVacant(runContext, runner.command, normalized.identity); err != nil {
@@ -91,7 +115,6 @@ func (runner *DockerRunner) Run(
 	if err != nil {
 		return instance, err
 	}
-	defer func() { _ = removeSnapshotDirectory(runner.temporaryRoot, normalized.identity) }()
 	overridePath, err := writeSnapshotFile(snapshotDirectory, overrideFileName, overrideData)
 	if err != nil {
 		return instance, err
@@ -119,22 +142,37 @@ func (runner *DockerRunner) Run(
 		"--no-build", "--pull", "never",
 	)
 	_, startErr := runner.command.run(runContext, normalized.Limits.OutputBytes, upArgs...)
-	var useErr error
-	if startErr == nil {
-		useErr = use(runContext, instance)
-	}
-
-	cleanupContext, cleanupCancel := context.WithTimeout(context.WithoutCancel(ctx), runner.cleanupTimeout)
-	cleanupErr := runner.cleaner.cleanup(cleanupContext, normalized.identity)
-	cleanupCancel()
-
 	if startErr != nil {
-		return instance, errors.Join(fmt.Errorf("start Compose sandbox: %w", startErr), cleanupErr)
+		return instance, fmt.Errorf("start Compose sandbox: %w", startErr)
 	}
-	if cause := context.Cause(runContext); cause != nil {
-		useErr = errors.Join(useErr, cause)
+	callback := make(chan callbackResult, 1)
+	go invokeCallback(runContext, instance, use, callback)
+	select {
+	case completed := <-callback:
+		if completed.panicValue != nil {
+			panic(completed.panicValue)
+		}
+		if cause := context.Cause(runContext); cause != nil {
+			return instance, errors.Join(completed.err, cause)
+		}
+		return instance, completed.err
+	case <-runContext.Done():
+		return instance, context.Cause(runContext)
 	}
-	return instance, errors.Join(useErr, cleanupErr)
+}
+
+type callbackResult struct {
+	err        error
+	panicValue any
+}
+
+func invokeCallback(ctx context.Context, instance Instance, use func(context.Context, Instance) error, result chan<- callbackResult) {
+	defer func() {
+		if value := recover(); value != nil {
+			result <- callbackResult{panicValue: value}
+		}
+	}()
+	result <- callbackResult{err: use(ctx, instance)}
 }
 
 func durationSeconds(duration time.Duration) string {
