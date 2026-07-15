@@ -6,6 +6,7 @@ require (
 	github.com/minio/minio-go/v7 v7.2.1
 	github.com/testcontainers/testcontainers-go v0.43.0
 	github.com/testcontainers/testcontainers-go/modules/minio v0.43.0
+	golang.org/x/mod v0.37.0
 	modernc.org/sqlite v1.53.0
 )
 

@@ -864,8 +864,38 @@ func TestCapabilitiesRequiresStructuredResticVersionAtLeast018(t *testing.T) {
 			wantVersion: "restic/0.19.1",
 		},
 		{
+			name:        "stable minimum",
+			output:      `{"message_type":"version","version":"0.18.0"}`,
+			wantVersion: "restic/0.18.0",
+		},
+		{
+			name:        "newer prerelease",
+			output:      `{"message_type":"version","version":"0.18.1-rc.1"}`,
+			wantVersion: "restic/0.18.1-rc.1",
+		},
+		{
+			name:        "minimum with build metadata",
+			output:      `{"message_type":"version","version":"0.18.0+build.1"}`,
+			wantVersion: "restic/0.18.0+build.1",
+		},
+		{
 			name:    "too old",
 			output:  `{"message_type":"version","version":"0.17.3"}`,
+			wantErr: "restic 0.18.0 or newer is required",
+		},
+		{
+			name:    "incomplete minimum",
+			output:  `{"message_type":"version","version":"0.18"}`,
+			wantErr: "restic 0.18.0 or newer is required",
+		},
+		{
+			name:    "prerelease below stable minimum",
+			output:  `{"message_type":"version","version":"0.18.0-rc.1"}`,
+			wantErr: "restic 0.18.0 or newer is required",
+		},
+		{
+			name:    "invalid semantic version",
+			output:  `{"message_type":"version","version":"0.18.00"}`,
 			wantErr: "restic 0.18.0 or newer is required",
 		},
 		{

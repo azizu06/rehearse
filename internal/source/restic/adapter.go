@@ -14,22 +14,21 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
-	"strconv"
 	"strings"
 	"time"
 
 	"github.com/azizu06/rehearse/internal/drill"
 	"github.com/azizu06/rehearse/internal/source"
+	"golang.org/x/mod/semver"
 )
 
 const (
-	minimumMajor          = 0
-	minimumMinor          = 18
+	minimumVersion        = "v0.18.0"
 	defaultMaxStdoutBytes = 8 << 20
 	defaultMaxStderrBytes = 1 << 20
 )
 
-var semanticVersionPattern = regexp.MustCompile(`^(\d+)\.(\d+)(?:\.(\d+))?(?:[-+].*)?$`)
+var semanticVersionPattern = regexp.MustCompile(`^\d+\.\d+\.\d+(?:[-+].*)?$`)
 var snapshotIDPattern = regexp.MustCompile(`^[a-f0-9]{64}$`)
 
 // RepositoryKind identifies the repository backends supported by Issue #7.
@@ -188,16 +187,8 @@ func (adapter *Adapter) Capabilities(ctx context.Context) (source.Capabilities, 
 }
 
 func supportedVersion(version string) bool {
-	match := semanticVersionPattern.FindStringSubmatch(version)
-	if match == nil {
-		return false
-	}
-	major, errMajor := strconv.Atoi(match[1])
-	minor, errMinor := strconv.Atoi(match[2])
-	if errMajor != nil || errMinor != nil {
-		return false
-	}
-	return major > minimumMajor || major == minimumMajor && minor >= minimumMinor
+	candidate := "v" + version
+	return semanticVersionPattern.MatchString(version) && semver.IsValid(candidate) && semver.Compare(candidate, minimumVersion) >= 0
 }
 
 var errOutputLimit = errors.New("process output limit exceeded")
