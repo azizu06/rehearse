@@ -26,6 +26,8 @@ const (
 	minimumVersion        = "v0.18.0"
 	defaultMaxStdoutBytes = 8 << 20
 	defaultMaxStderrBytes = 1 << 20
+	hardMaxStdoutBytes    = 64 << 20
+	hardMaxStderrBytes    = 8 << 20
 )
 
 var semanticVersionPattern = regexp.MustCompile(`^\d+\.\d+\.\d+(?:[-+].*)?$`)
@@ -126,6 +128,9 @@ func New(config Config, resolver source.CredentialResolver) (*Adapter, error) {
 	if config.MaxStdoutBytes < 1 || config.MaxStderrBytes < 1 {
 		return nil, &source.Failure{Kind: source.FailureInvalidInput, Operation: "configure", SafeHint: "restic output limits must be positive"}
 	}
+	if config.MaxStdoutBytes > hardMaxStdoutBytes || config.MaxStderrBytes > hardMaxStderrBytes {
+		return nil, &source.Failure{Kind: source.FailureInvalidInput, Operation: "configure", SafeHint: "restic output limits exceed the supported maximum"}
+	}
 	return &Adapter{config: config, resolver: resolver}, nil
 }
 
@@ -191,7 +196,14 @@ func supportedVersion(version string) bool {
 	return semanticVersionPattern.MatchString(version) && semver.IsValid(candidate) && semver.Compare(candidate, minimumVersion) >= 0
 }
 
-var errOutputLimit = errors.New("process output limit exceeded")
+var (
+	errOutputLimit              = errors.New("process output limit exceeded")
+	errInvalidResticMessageType = errors.New("invalid restic message_type")
+	errInvalidRestoreSummary    = errors.New("invalid restic restore summary")
+	errInvalidStructuredExit    = errors.New("invalid structured restic exit")
+	errInconsistentExitCode     = errors.New("inconsistent structured restic exit code")
+	errMissingStructuredExit    = errors.New("missing structured restic exit")
+)
 
 type boundedBuffer struct {
 	buffer bytes.Buffer
@@ -442,37 +454,20 @@ func removePrivateTree(path string) error {
 	return os.RemoveAll(path)
 }
 
-type resticMessageType struct {
-	value   string
-	present bool
-}
-
-func (messageType *resticMessageType) UnmarshalJSON(data []byte) error {
-	if bytes.Equal(bytes.TrimSpace(data), []byte("null")) {
-		return errors.New("restic message_type must not be null")
-	}
-	var value string
-	if err := json.Unmarshal(data, &value); err != nil {
-		return err
-	}
-	messageType.value = value
-	messageType.present = true
-	return nil
-}
-
-type resticEnvelope struct {
-	MessageType resticMessageType `json:"message_type"`
-}
-
 func decodeResticMessageType(raw json.RawMessage) (string, error) {
-	var envelope resticEnvelope
-	if err := json.Unmarshal(raw, &envelope); err != nil {
-		return "", err
+	var object map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &object); err != nil {
+		return "", errInvalidResticMessageType
 	}
-	if !envelope.MessageType.present {
-		return "", errors.New("restic message_type is required")
+	encoded, ok := object["message_type"]
+	if !ok || bytes.Equal(bytes.TrimSpace(encoded), []byte("null")) {
+		return "", errInvalidResticMessageType
 	}
-	return envelope.MessageType.value, nil
+	var messageType string
+	if err := json.Unmarshal(encoded, &messageType); err != nil {
+		return "", errInvalidResticMessageType
+	}
+	return messageType, nil
 }
 
 type restoreStatus struct {
@@ -495,6 +490,18 @@ type restoreSummary struct {
 type restoreCounter uint64
 
 type restoreFraction float64
+
+func decodeRestoreSummary(raw json.RawMessage) (restoreSummary, error) {
+	messageType, err := decodeResticMessageType(raw)
+	if err != nil || messageType != "summary" {
+		return restoreSummary{}, errInvalidRestoreSummary
+	}
+	var summary restoreSummary
+	if err := json.Unmarshal(raw, &summary); err != nil || summary.FilesRestored > summary.TotalFiles || summary.BytesRestored > summary.TotalBytes {
+		return restoreSummary{}, errInvalidRestoreSummary
+	}
+	return summary, nil
+}
 
 func (counter *restoreCounter) UnmarshalJSON(data []byte) error {
 	if bytes.Equal(bytes.TrimSpace(data), []byte("null")) {
@@ -673,8 +680,8 @@ func (adapter *Adapter) runRestore(
 				})
 			}
 		case "summary":
-			var summary restoreSummary
-			if err := json.Unmarshal(raw, &summary); err != nil || summary.FilesRestored > summary.TotalFiles || summary.BytesRestored > summary.TotalBytes {
+			summary, err := decodeRestoreSummary(raw)
+			if err != nil {
 				cancel()
 				_ = command.Wait()
 				if ctx.Err() != nil {
@@ -728,7 +735,7 @@ type exitErrorMessage struct {
 	Code int `json:"code"`
 }
 
-func failureForExit(operation string, exitCode int, stderr []byte) error {
+func validateStructuredExit(stderr []byte, exitCode int) error {
 	decoder := json.NewDecoder(bytes.NewReader(stderr))
 	exitMessageSeen := false
 	for {
@@ -738,25 +745,38 @@ func failureForExit(operation string, exitCode int, stderr []byte) error {
 			break
 		}
 		if err != nil {
-			return &source.Failure{Kind: source.FailureCorruptOutput, Operation: operation, ExitCode: exitCode, SafeHint: "restic returned invalid error JSON"}
+			return errInvalidStructuredExit
 		}
 		messageType, err := decodeResticMessageType(raw)
 		if err != nil {
-			return &source.Failure{Kind: source.FailureCorruptOutput, Operation: operation, ExitCode: exitCode, SafeHint: "restic returned invalid error JSON"}
+			return errInvalidStructuredExit
 		}
 		if messageType == "exit_error" {
 			var message exitErrorMessage
 			if err := json.Unmarshal(raw, &message); err != nil {
-				return &source.Failure{Kind: source.FailureCorruptOutput, Operation: operation, ExitCode: exitCode, SafeHint: "restic returned invalid error JSON"}
+				return errInvalidStructuredExit
 			}
 			if message.Code != exitCode {
-				return &source.Failure{Kind: source.FailureCorruptOutput, Operation: operation, ExitCode: exitCode, SafeHint: "restic returned inconsistent error JSON"}
+				return errInconsistentExitCode
 			}
 			exitMessageSeen = true
 		}
 	}
 	if !exitMessageSeen {
-		return &source.Failure{Kind: source.FailureCorruptOutput, Operation: operation, ExitCode: exitCode, SafeHint: "restic did not return structured error JSON"}
+		return errMissingStructuredExit
+	}
+	return nil
+}
+
+func failureForExit(operation string, exitCode int, stderr []byte) error {
+	if err := validateStructuredExit(stderr, exitCode); err != nil {
+		safeHint := "restic returned invalid error JSON"
+		if errors.Is(err, errInconsistentExitCode) {
+			safeHint = "restic returned inconsistent error JSON"
+		} else if errors.Is(err, errMissingStructuredExit) {
+			safeHint = "restic did not return structured error JSON"
+		}
+		return &source.Failure{Kind: source.FailureCorruptOutput, Operation: operation, ExitCode: exitCode, SafeHint: safeHint}
 	}
 
 	switch exitCode {
@@ -765,7 +785,7 @@ func failureForExit(operation string, exitCode int, stderr []byte) error {
 	case 12:
 		return &source.Failure{Kind: source.FailureAuthentication, Operation: operation, ExitCode: exitCode, SafeHint: "restic repository credentials were rejected"}
 	case 130:
-		return &source.Failure{Kind: source.FailureCancelled, Operation: operation, ExitCode: exitCode, SafeHint: "restic operation was cancelled"}
+		return &source.Failure{Kind: source.FailureProcess, Operation: operation, ExitCode: exitCode, SafeHint: "restic process was interrupted independently of the caller"}
 	default:
 		return &source.Failure{Kind: source.FailureProcess, Operation: operation, ExitCode: exitCode, SafeHint: "restic command failed"}
 	}

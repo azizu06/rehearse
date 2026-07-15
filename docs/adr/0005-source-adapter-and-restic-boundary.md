@@ -13,9 +13,10 @@ caller's context.
 
 Implement the first adapter through restic 0.18.0 or newer. Invoke the restic
 binary directly without a shell, request its documented JSON formats, bound
-stdout and stderr independently, tolerate additive JSON fields and message
-types, and never expose raw command output through errors, progress, logs, or
-artifacts. Every JSON-lines object must carry a present, non-null string
+stdout and stderr independently with hard configuration ceilings of 64 MiB and
+8 MiB respectively, tolerate additive JSON fields and message types, and never
+expose raw command output through errors, progress, logs, or artifacts. Every
+JSON-lines object must carry a present, non-null string
 `message_type`; unknown string values remain forward-compatible and are ignored.
 Repository reads use `--no-lock` and `--no-cache`.
 
@@ -54,5 +55,11 @@ prevents a partial restore from masquerading as a usable recovery artifact.
   real integration, failure, immutability, redaction, and cleanup tests pass.
 - Successful artifact cleanup belongs to later orchestration and janitor work;
   failed acquisition cleanup remains the source adapter's responsibility.
+- Caller context state is the only source of cancelled or timed-out failures.
+  Restic exit 130 with a live caller context is an independent process failure.
+- Deferred cleanup covers normal success, failure, cancellation, timeout, and
+  process-start paths. A forced Rehearse process termination can bypass defers;
+  durable attribution and restart reconciliation of orphaned credential files
+  belongs to Issue #18's reliability and security hardening.
 - Local archive, plain S3-object, custom-command, target, Docker, UI, and auth
   behavior remain outside this decision.

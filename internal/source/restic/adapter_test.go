@@ -3,6 +3,7 @@ package restic_test
 import (
 	"context"
 	"errors"
+	"math"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -78,6 +79,32 @@ exit `+strconv.Itoa(test.exitCode)+`
 			}
 		})
 	}
+}
+
+func TestListTreatsIndependentExit130AsProcessFailure(t *testing.T) {
+	t.Parallel()
+
+	const privateOutput = "private-independent-interrupt-marker"
+	credentialTempDir := t.TempDir()
+	adapter := newTestAdapter(t, resticadapter.Config{
+		Binary: writeFakeResticScript(t, `
+printf '%s\n' '{"message_type":"exit_error","code":130,"message":"`+privateOutput+`"}' >&2
+exit 130
+`),
+		Repository:        resticadapter.Repository{Kind: resticadapter.RepositoryLocal, Location: t.TempDir()},
+		Password:          drill.CredentialReference{Provider: drill.CredentialEnvironment, Locator: "REHEARSE_TEST_RESTIC_PASSWORD"},
+		CredentialTempDir: credentialTempDir,
+	})
+
+	_, err := adapter.ListRecoveryPoints(context.Background())
+	var failure *source.Failure
+	if !errors.As(err, &failure) || failure.Kind != source.FailureProcess || failure.ExitCode != 130 {
+		t.Fatalf("failure = %+v, want process failure with exit 130", failure)
+	}
+	if strings.Contains(err.Error(), privateOutput) {
+		t.Fatalf("private process output leaked through error: %v", err)
+	}
+	assertDirectoryEmpty(t, credentialTempDir)
 }
 
 func TestListRejectsInvalidErrorMessageType(t *testing.T) {
@@ -903,6 +930,46 @@ func TestListBoundsStdoutAndStderrIndependently(t *testing.T) {
 	}
 }
 
+func TestListTerminatesChattyChildAtOutputBounds(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		body string
+	}{
+		{name: "stdout", body: `while :; do printf '%064d' 0; done`},
+		{name: "stderr", body: `while :; do printf '%064d' 0 >&2; done`},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+
+			credentialTempDir := t.TempDir()
+			adapter := newTestAdapter(t, resticadapter.Config{
+				Binary:            writeFakeResticScript(t, test.body),
+				Repository:        resticadapter.Repository{Kind: resticadapter.RepositoryLocal, Location: t.TempDir()},
+				Password:          drill.CredentialReference{Provider: drill.CredentialEnvironment, Locator: "REHEARSE_TEST_RESTIC_PASSWORD"},
+				CredentialTempDir: credentialTempDir,
+				MaxStdoutBytes:    128,
+				MaxStderrBytes:    128,
+			})
+			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+			defer cancel()
+
+			_, err := adapter.ListRecoveryPoints(ctx)
+			var failure *source.Failure
+			if !errors.As(err, &failure) || failure.Kind != source.FailureOutputLimit {
+				t.Fatalf("failure = %+v, want output limit", failure)
+			}
+			if ctx.Err() != nil {
+				t.Fatalf("chatty child reached caller deadline instead of bounded termination: %v", ctx.Err())
+			}
+			assertDirectoryEmpty(t, credentialTempDir)
+		})
+	}
+}
+
 func TestAcquireBoundsStdoutAndStderrIndependentlyAndRemovesStaging(t *testing.T) {
 	t.Parallel()
 
@@ -1022,6 +1089,42 @@ func TestNewRejectsUnsafeRepositoryAndCredentialTempLocations(t *testing.T) {
 			}
 			if strings.Contains(err.Error(), test.private) {
 				t.Fatalf("unsafe location leaked through error: %v", err)
+			}
+		})
+	}
+}
+
+func TestNewRejectsOutputLimitsAboveHardMaximum(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name      string
+		maxStdout int64
+		maxStderr int64
+	}{
+		{name: "stdout MaxInt64", maxStdout: math.MaxInt64, maxStderr: 1},
+		{name: "stderr MaxInt64", maxStdout: 1, maxStderr: math.MaxInt64},
+		{name: "stdout above hard maximum", maxStdout: 64<<20 + 1, maxStderr: 1},
+		{name: "stderr above hard maximum", maxStdout: 1, maxStderr: 8<<20 + 1},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+
+			_, err := resticadapter.New(resticadapter.Config{
+				Binary:            writeFakeRestic(t, `{"message_type":"version","version":"0.19.1"}`),
+				Repository:        resticadapter.Repository{Kind: resticadapter.RepositoryLocal, Location: t.TempDir()},
+				Password:          drill.CredentialReference{Provider: drill.CredentialEnvironment, Locator: "REHEARSE_TEST_RESTIC_PASSWORD"},
+				CredentialTempDir: t.TempDir(),
+				MaxStdoutBytes:    test.maxStdout,
+				MaxStderrBytes:    test.maxStderr,
+			}, credentialResolver(func(context.Context, drill.CredentialReference) ([]byte, error) {
+				return []byte("fixture-password"), nil
+			}))
+			var failure *source.Failure
+			if !errors.As(err, &failure) || failure.Kind != source.FailureInvalidInput {
+				t.Fatalf("failure = %+v, want invalid input", failure)
 			}
 		})
 	}
