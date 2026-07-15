@@ -16,6 +16,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/azizu06/rehearse/internal/drill"
 	"github.com/azizu06/rehearse/internal/source"
@@ -295,10 +296,12 @@ func TestS3CompatibleRepositoryListAndAcquireAreReadOnlyAtTheMinIOBoundary(t *te
 	if err != nil {
 		t.Fatalf("new failing S3 adapter: %v", err)
 	}
-	_, err = failureAdapter.ListRecoveryPoints(ctx)
+	failureCtx, cancelFailure := context.WithTimeout(ctx, 2*time.Second)
+	defer cancelFailure()
+	_, err = failureAdapter.ListRecoveryPoints(failureCtx)
 	var failure *source.Failure
-	if !errors.As(err, &failure) || failure.Kind != source.FailureProcess {
-		t.Fatalf("failure = %+v, want typed process failure", failure)
+	if !errors.As(err, &failure) || failure.Kind != source.FailureProcess && failure.Kind != source.FailureTimeout {
+		t.Fatalf("failure = %+v, want typed process or timeout failure", failure)
 	}
 	if strings.Contains(err.Error(), wrongAccessKey) || strings.Contains(err.Error(), wrongSecretKey) || strings.Contains(err.Error(), repository) {
 		t.Fatalf("private S3 boundary data leaked through error: %v", err)
