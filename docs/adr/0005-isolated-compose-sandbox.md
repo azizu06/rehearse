@@ -51,6 +51,12 @@ The original Compose inputs are rendered with the generated policy into one
 final JSON snapshot. Rehearse resolves each service's selected local platform
 image to an immutable image ID, validates that exact image configuration, and
 rewrites and revalidates the snapshot before `up` receives only those bytes.
+Image identity and platform use a narrow scalar inspection first. The separate
+declared-volume query targets only that immutable ID and tries direct
+`.Config.Volumes` access before the map-compatible `index .Config "Volumes"`
+fallback on template-command failure. The fallback is compatibility insurance
+for the supported Docker 28/29 matrices, not an expected Docker 29 path; neither
+query renders the full image config, environment, or command.
 The runner also checks every exact generated container, network, and volume
 name without ownership filters and refuses to adopt any existing object. While
 holding the project lock, it then atomically creates every generated network and

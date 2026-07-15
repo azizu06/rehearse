@@ -112,7 +112,7 @@ func TestExecutionSnapshotRejectsNonGeneratedResourceFields(t *testing.T) {
 }
 
 func TestImageVolumeDeclarationRequiresAnAttributableMount(t *testing.T) {
-	command := imageVolumeDocker([]byte(`{"id":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","os":"linux","architecture":"amd64","variant":"","volumes":{"/var/lib/data":{}}}`))
+	command := imageVolumeDocker([]byte(`{"/var/lib/data":{}}`))
 	model := composeModel{Services: map[string]composeService{
 		"worker": {Image: "local-image"},
 	}}
@@ -130,7 +130,10 @@ func TestImageVolumeDeclarationRequiresAnAttributableMount(t *testing.T) {
 
 type imageVolumeDocker []byte
 
-func (output imageVolumeDocker) run(context.Context, int64, ...string) ([]byte, error) {
+func (output imageVolumeDocker) run(_ context.Context, _ int64, args ...string) ([]byte, error) {
+	if argumentAfter(args, "--format") == imageIdentityFormat {
+		return []byte(testScalarImageMetadata), nil
+	}
 	return output, nil
 }
 

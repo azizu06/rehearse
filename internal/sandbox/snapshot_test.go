@@ -77,7 +77,10 @@ func (docker *mutationDocker) run(_ context.Context, _ int64, args ...string) ([
 		return docker.rendered, nil
 	}
 	if containsSequence(args, "image", "inspect") {
-		return []byte(`{"id":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","os":"linux","architecture":"amd64","variant":"","volumes":null}`), nil
+		if argumentAfter(args, "--format") == imageIdentityFormat {
+			return []byte(testScalarImageMetadata), nil
+		}
+		return []byte(`null`), nil
 	}
 	if len(args) >= 2 && (args[0] == "network" || args[0] == "volume") && args[1] == "create" {
 		if docker.resources == nil {

@@ -75,6 +75,8 @@ type runnerDocker struct {
 	imageVariant        string
 	imageInspectCall    []string
 	imageVolumes        []byte
+	imageVolumeCalls    int
+	imageVolumeErrors   []error
 	includeVolume       bool
 	lateCollision       bool
 	collisionVisible    bool
@@ -175,6 +177,18 @@ func (docker *runnerDocker) run(ctx context.Context, _ int64, args ...string) ([
 		return nil, nil
 	}
 	if containsSequence(args, "image", "inspect") {
+		format := argumentAfter(args, "--format")
+		if format == imageVolumesFormat || format == imageVolumesFallbackFormat {
+			call := docker.imageVolumeCalls
+			docker.imageVolumeCalls++
+			if call < len(docker.imageVolumeErrors) && docker.imageVolumeErrors[call] != nil {
+				return []byte("image-volume-template-secret"), docker.imageVolumeErrors[call]
+			}
+			if docker.imageVolumes != nil {
+				return docker.imageVolumes, nil
+			}
+			return []byte("null"), nil
+		}
 		docker.imageInspectCall = append([]string(nil), args...)
 		imageID := docker.imageID
 		if imageID == "" {
@@ -188,17 +202,12 @@ func (docker *runnerDocker) run(ctx context.Context, _ int64, args ...string) ([
 		if architecture == "" {
 			architecture = "amd64"
 		}
-		volumes := json.RawMessage("null")
-		if docker.imageVolumes != nil {
-			volumes = docker.imageVolumes
-		}
 		output, err := json.Marshal(struct {
-			ID           string          `json:"id"`
-			OS           string          `json:"os"`
-			Architecture string          `json:"architecture"`
-			Variant      string          `json:"variant"`
-			Volumes      json.RawMessage `json:"volumes"`
-		}{imageID, operatingSystem, architecture, docker.imageVariant, volumes})
+			ID           string `json:"id"`
+			OS           string `json:"os"`
+			Architecture string `json:"architecture"`
+			Variant      string `json:"variant"`
+		}{imageID, operatingSystem, architecture, docker.imageVariant})
 		if docker.retagTo != "" {
 			docker.imageID = docker.retagTo
 		}
@@ -520,6 +529,46 @@ func TestRunnerRejectsImagesThatDeclareAnonymousVolumes(t *testing.T) {
 	}
 	if callbackCalled || command.upCall != nil {
 		t.Fatal("runner started a sandbox for an image declaring anonymous volumes")
+	}
+}
+
+func TestRunnerImageVolumeInspectionFailureIsRedactedBeforeResourceCreation(t *testing.T) {
+	tests := []struct {
+		name   string
+		output []byte
+		errors []error
+	}{
+		{
+			name:   "both compatibility templates fail",
+			errors: []error{errors.New("primary-template-secret"), errors.New("fallback-template-secret")},
+		},
+		{
+			name:   "successful template returns malformed JSON",
+			output: []byte(`["image-volume-metadata-secret"]`),
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			command := &runnerDocker{imageVolumes: test.output, imageVolumeErrors: test.errors}
+			journal := &recordingCleanupJournal{}
+			runner := testRunner(t, command, journal)
+			_, err := runner.Run(context.Background(), testRunnerRequest("run-image-volume-inspection-failure", time.Minute), func(context.Context, Instance) error {
+				t.Fatal("callback ran after image volume metadata failure")
+				return nil
+			})
+			if !errors.Is(err, ErrUnsafeCompose) {
+				t.Fatalf("Run error = %v, want ErrUnsafeCompose", err)
+			}
+			if strings.Contains(err.Error(), "secret") {
+				t.Fatalf("Run exposed image inspection output or error: %v", err)
+			}
+			if command.upCall != nil || len(command.reservationCalls) != 0 || len(command.resources) != 0 {
+				t.Fatalf("image metadata failure leaked resources: up=%v reservations=%v resources=%v", command.upCall, command.reservationCalls, command.resources)
+			}
+			if len(journal.resources) != 0 || journal.lastStatus() != drill.CleanupSucceeded {
+				t.Fatalf("image metadata failure did not close its empty durable cleanup claim: %#v", journal)
+			}
+		})
 	}
 }
 

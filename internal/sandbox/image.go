@@ -10,7 +10,11 @@ import (
 	"strings"
 )
 
-const imageMetadataFormat = `{"id":{{json .Id}},"os":{{json .Os}},"architecture":{{json .Architecture}},"variant":{{json .Variant}},"volumes":{{json (index .Config "Volumes")}}}`
+const (
+	imageIdentityFormat        = `{"id":{{json .Id}},"os":{{json .Os}},"architecture":{{json .Architecture}},"variant":{{json .Variant}}}`
+	imageVolumesFormat         = `{{json .Config.Volumes}}`
+	imageVolumesFallbackFormat = `{{json (index .Config "Volumes")}}`
+)
 
 var immutableImageIDPattern = regexp.MustCompile(`^sha256:[a-f0-9]{64}$`)
 
@@ -19,7 +23,7 @@ type localImageMetadata struct {
 	OS           string                     `json:"os"`
 	Architecture string                     `json:"architecture"`
 	Variant      string                     `json:"variant"`
-	Volumes      map[string]json.RawMessage `json:"volumes"`
+	Volumes      map[string]json.RawMessage `json:"-"`
 }
 
 func pinServiceImages(ctx context.Context, command dockerCommand, snapshot []byte, model composeModel) ([]byte, error) {
@@ -53,7 +57,7 @@ func inspectLocalImage(ctx context.Context, command dockerCommand, name string, 
 	if service.Platform != "" {
 		args = append(args, "--platform", service.Platform)
 	}
-	args = append(args, "--format", imageMetadataFormat, service.Image)
+	args = append(args, "--format", imageIdentityFormat, service.Image)
 	output, err := command.run(ctx, dockerMetadataOutputLimit, args...)
 	if err != nil {
 		return localImageMetadata{}, fmt.Errorf("inspect service %q selected local image: %w", name, err)
@@ -68,7 +72,31 @@ func inspectLocalImage(ctx context.Context, command dockerCommand, name string, 
 	if err := validateImagePlatform(service.Platform, metadata); err != nil {
 		return localImageMetadata{}, unsafeService(name, err.Error())
 	}
+	volumes, err := inspectLocalImageVolumes(ctx, command, metadata.ID)
+	if err != nil {
+		return localImageMetadata{}, unsafeService(name, "image volume metadata inspection failed")
+	}
+	metadata.Volumes = volumes
 	return metadata, nil
+}
+
+func inspectLocalImageVolumes(ctx context.Context, command dockerCommand, immutableImageID string) (map[string]json.RawMessage, error) {
+	output, err := command.run(ctx, dockerMetadataOutputLimit,
+		"image", "inspect", "--format", imageVolumesFormat, immutableImageID,
+	)
+	if err != nil {
+		output, err = command.run(ctx, dockerMetadataOutputLimit,
+			"image", "inspect", "--format", imageVolumesFallbackFormat, immutableImageID,
+		)
+		if err != nil {
+			return nil, err
+		}
+	}
+	var volumes map[string]json.RawMessage
+	if err := decodeStrictJSON(output, &volumes); err != nil {
+		return nil, err
+	}
+	return volumes, nil
 }
 
 func validateImagePlatform(platform string, metadata localImageMetadata) error {
