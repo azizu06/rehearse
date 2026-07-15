@@ -76,12 +76,13 @@ alternate separators, replicas, suffixes, and foreign project names fail closed.
 Stable run labels remain attribution
 metadata and are never sufficient deletion authority. Live cleanup keeps an
 invocation-local ledger containing only successfully created and immediately
-verified resource type, name, daemon identity where available, and full labels.
-It deletes only ledgered resources whose current identity and full labels still
-match. Startup cleanup uses the durable manifest and deletes only the exact name
-carrying the active claim, expected generation, and every stable run label. If
-the process exits after manifest append but before creation, no resource
-matches. If it exits after creation, the manifest authorizes reconciliation.
+verified resource type, name, daemon identity where available, and the generation
+needed to reconstruct its full labels. It deletes only ledgered resources whose
+current identity and reconstructed labels still match. Startup cleanup uses the
+durable manifest and deletes only the exact name carrying the active claim,
+expected generation, and every stable run label. If the process exits after
+manifest append but before creation, no resource matches. If it exits after
+creation, the manifest authorizes reconciliation.
 Existing or late-colliding resources are never adopted or deleted, even when
 they reproduce every stable label. A Docker-daemon administrator remains inside
 the trusted local boundary and can subvert Docker resource metadata.
@@ -89,10 +90,11 @@ the trusted local boundary and can subvert Docker resource metadata.
 Cleanup uses a fresh bounded context after success, failure, cancellation,
 timeout, or output overflow.
 Container removal never cascades into attached volumes; every volume deletion
-comes from the exact ownership-filtered volume list.
+targets an exact live-ledger or durable-manifest name after its full ownership
+labels are reverified.
 After an initial 500 ms daemon-settle interval, cleanup requires two empty
-label-filtered scans separated by another 500 ms. Failure to prove quiescence is
-recorded as retryable cleanup failure.
+ownership-verified passes separated by another 500 ms. Failure to prove
+quiescence is recorded as retryable cleanup failure.
 
 The startup janitor consumes Issue #6's durable queue:
 `needs_reconciliation = 1`, cleanup status `pending` or `failed`, or a failed
