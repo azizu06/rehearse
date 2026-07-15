@@ -222,14 +222,18 @@ type resourceOverride struct {
 }
 
 func parseAndValidateCompose(data []byte, identity identity) (composeModel, error) {
-	return parseAndValidateComposeMode(data, identity, nil)
+	return parseAndValidateComposeMode(data, identity, nil, false)
 }
 
 func parseAndValidateSnapshot(data []byte, identity identity, limits Limits) (composeModel, error) {
-	return parseAndValidateComposeMode(data, identity, &limits)
+	return parseAndValidateComposeMode(data, identity, &limits, false)
 }
 
-func parseAndValidateComposeMode(data []byte, identity identity, enforced *Limits) (composeModel, error) {
+func parseAndValidateReservedSnapshot(data []byte, identity identity, limits Limits) (composeModel, error) {
+	return parseAndValidateComposeMode(data, identity, &limits, true)
+}
+
+func parseAndValidateComposeMode(data []byte, identity identity, enforced *Limits, reserved bool) (composeModel, error) {
 	var model composeModel
 	if err := decodeStrictJSON(data, &model); err != nil {
 		return composeModel{}, fmt.Errorf("%w: parse resolved Compose model: %v", ErrUnsafeCompose, err)
@@ -360,13 +364,13 @@ func parseAndValidateComposeMode(data []byte, identity identity, enforced *Limit
 		}
 	}
 
-	if err := validateResources("network", model.Networks, identity.projectName, true); err != nil {
+	if err := validateResources("network", model.Networks, identity.projectName, true, reserved); err != nil {
 		return composeModel{}, err
 	}
-	if err := validateResources("volume", model.Volumes, identity.projectName, false); err != nil {
+	if err := validateResources("volume", model.Volumes, identity.projectName, false, reserved); err != nil {
 		return composeModel{}, err
 	}
-	if enforced != nil {
+	if enforced != nil && !reserved {
 		if err := validateEnforcedResources(model, identity); err != nil {
 			return composeModel{}, err
 		}
@@ -374,10 +378,16 @@ func parseAndValidateComposeMode(data []byte, identity identity, enforced *Limit
 	return model, nil
 }
 
-func validateResources(kind string, resources map[string]composeResource, projectName string, network bool) error {
+func validateResources(kind string, resources map[string]composeResource, projectName string, network bool, reserved bool) error {
 	for name, resource := range resources {
 		if err := validateComposeKey(kind, name); err != nil {
 			return err
+		}
+		if reserved {
+			if !resource.External || resource.Name != projectName+"_"+name || resource.Attachable || resource.Driver != "" || len(resource.DriverOpts) != 0 || resource.EnableIPv4 != nil || resource.EnableIPv6 != nil || rawSet(resource.IPAM) || resource.Internal || len(resource.Labels) != 0 {
+				return fmt.Errorf("%w: reserved %s %q must be an exact external name-only reference", ErrUnsafeCompose, kind, name)
+			}
+			continue
 		}
 		if resource.External {
 			return fmt.Errorf("%w: external %s %q is not allowed", ErrUnsafeCompose, kind, name)

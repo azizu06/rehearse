@@ -139,6 +139,7 @@ func TestCleanerWaitsForAndRemovesDelayedResources(t *testing.T) {
 			"--label", "dev.rehearse.managed=true",
 			"--label", "dev.rehearse.run-fingerprint="+runFingerprint,
 			"--label", "dev.rehearse.project="+projectName,
+			"--label", "dev.rehearse.run-id="+runID,
 			volumeName,
 		)
 		_ = command.Run()

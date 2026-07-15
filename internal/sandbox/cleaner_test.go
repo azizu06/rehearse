@@ -30,7 +30,7 @@ func TestCleanerRequiresSeparatedEmptyScansAndFindsDelayedResource(t *testing.T)
 	}
 	for _, call := range command.calls {
 		joined := strings.Join(call, " ")
-		if strings.Contains(joined, " ls ") && (!strings.Contains(joined, "label="+managedLabel+"=true") || !strings.Contains(joined, "label="+runFingerprintLabel+"="+identity.fingerprint)) {
+		if strings.Contains(joined, " ls ") && (!strings.Contains(joined, "label="+managedLabel+"=true") || !strings.Contains(joined, "label="+runFingerprintLabel+"="+identity.fingerprint) || !strings.Contains(joined, "label="+runIDLabel+"="+identity.runID)) {
 			t.Fatalf("unscoped list call: %v", call)
 		}
 	}

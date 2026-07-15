@@ -52,14 +52,20 @@ final JSON snapshot. Rehearse resolves each service's selected local platform
 image to an immutable image ID, validates that exact image configuration, and
 rewrites and revalidates the snapshot before `up` receives only those bytes.
 The runner also checks every exact generated container, network, and volume
-name without ownership filters and refuses to adopt any existing object.
+name without ownership filters and refuses to adopt any existing object. While
+holding the project lock, it then atomically creates every generated network and
+named volume with the exact managed, project, run ID, and full-fingerprint
+labels and immediately verifies those labels. The final revalidated snapshot
+references only those exact pre-created resources as external name-only
+references, so Compose cannot adopt a late unrelated name collision. Containers
+do not start unless every reservation verifies.
 Because rendering can interpolate secrets, the snapshot and transient policy
 live in a deterministic Rehearse-owned 0700 directory as 0600 files, are never
 included in command errors, and are removed by both normal cleanup and startup
 reconciliation after a process crash.
 
 Cleanup lists, inspects, and deletes only resources matching the Rehearse
-managed, project, and full run-fingerprint labels. It uses a fresh bounded
+managed, project, run ID, and full run-fingerprint labels. It uses a fresh bounded
 context after success, failure, cancellation, timeout, or output overflow.
 Container removal never cascades into attached volumes; every volume deletion
 comes from the exact ownership-filtered volume list.

@@ -22,13 +22,16 @@ var (
 	ErrConcurrentMutation = errors.New("run changed concurrently")
 	// ErrSandboxClaimed identifies a run whose one sandbox lifecycle is already owned.
 	ErrSandboxClaimed = errors.New("sandbox cleanup already claimed")
+	// ErrJournalOwned identifies a journal already held by another live runtime.
+	ErrJournalOwned = errors.New("journal is already owned by another runtime")
 )
 
 // Store owns one SQLite connection pool. A single open connection serializes
 // state-machine writes while still allowing callers to invoke Store safely from
 // concurrent goroutines.
 type Store struct {
-	database *sql.DB
+	database  *sql.DB
+	ownership *journalOwnership
 }
 
 // Open opens or creates a journal, applies embedded migrations, and marks any
@@ -37,16 +40,24 @@ func Open(ctx context.Context, path string) (*Store, error) {
 	if strings.TrimSpace(path) == "" {
 		return nil, errors.New("journal path is required")
 	}
-	database, err := sql.Open("sqlite", path)
+	canonicalPath, err := canonicalJournalPath(path)
 	if err != nil {
+		return nil, err
+	}
+	ownership, err := acquireJournalOwnership(canonicalPath)
+	if err != nil {
+		return nil, err
+	}
+	database, err := sql.Open("sqlite", canonicalPath)
+	if err != nil {
+		_ = ownership.release()
 		return nil, fmt.Errorf("open sqlite journal: %w", err)
 	}
 	database.SetMaxOpenConns(1)
 	database.SetMaxIdleConns(1)
 
 	closeWithError := func(cause error) (*Store, error) {
-		_ = database.Close()
-		return nil, cause
+		return nil, errors.Join(cause, database.Close(), ownership.release())
 	}
 	for _, pragma := range []string{
 		"PRAGMA foreign_keys = ON",
@@ -60,7 +71,7 @@ func Open(ctx context.Context, path string) (*Store, error) {
 	if err := applyMigrations(ctx, database); err != nil {
 		return closeWithError(err)
 	}
-	store := &Store{database: database}
+	store := &Store{database: database, ownership: ownership}
 	if err := store.requireRestartReconciliation(ctx, time.Now().UTC()); err != nil {
 		return closeWithError(err)
 	}
@@ -69,7 +80,7 @@ func Open(ctx context.Context, path string) (*Store, error) {
 
 // Close closes the SQLite journal.
 func (store *Store) Close() error {
-	return store.database.Close()
+	return errors.Join(store.database.Close(), store.ownership.release())
 }
 
 // SchemaVersion returns the newest applied migration version.

@@ -145,7 +145,10 @@ func ownershipFilters(identity identity, includeFingerprint bool) []string {
 		"--filter", "label=" + projectLabel + "=" + identity.projectName,
 	}
 	if includeFingerprint {
-		filters = append(filters, "--filter", "label="+runFingerprintLabel+"="+identity.fingerprint)
+		filters = append(filters,
+			"--filter", "label="+runFingerprintLabel+"="+identity.fingerprint,
+			"--filter", "label="+runIDLabel+"="+identity.runID,
+		)
 	}
 	return filters
 }

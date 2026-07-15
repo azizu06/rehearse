@@ -57,21 +57,29 @@ func TestRunnerUsesShellFreeNoBuildNoPullAndFreshCleanupContext(t *testing.T) {
 }
 
 type runnerDocker struct {
-	cancel            context.CancelFunc
-	upErr             error
-	upCall            []string
-	upSnapshotImage   string
-	cleanupObserved   bool
-	cleanupContextErr error
-	configCalls       int
-	platform          string
-	imageID           string
-	retagTo           string
-	imageOS           string
-	imageArchitecture string
-	imageVariant      string
-	imageInspectCall  []string
-	imageVolumes      []byte
+	cancel              context.CancelFunc
+	upErr               error
+	upCall              []string
+	upSnapshotImage     string
+	cleanupObserved     bool
+	cleanupContextErr   error
+	configCalls         int
+	platform            string
+	imageID             string
+	retagTo             string
+	imageOS             string
+	imageArchitecture   string
+	imageVariant        string
+	imageInspectCall    []string
+	imageVolumes        []byte
+	includeVolume       bool
+	lateCollision       bool
+	collisionVisible    bool
+	reservationMismatch string
+	reservationCalls    [][]string
+	reservedLabels      map[string]map[string]string
+	upReservedVolume    bool
+	upReservedNetwork   bool
 }
 
 const testImageID = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
@@ -99,10 +107,51 @@ func (docker *runnerDocker) run(ctx context.Context, _ int64, args ...string) ([
 			}
 		}
 		service := map[string]any{"image": "alpine"}
+		document := map[string]any{"services": map[string]any{"worker": service}}
+		if docker.includeVolume {
+			service["volumes"] = []map[string]any{{"type": "volume", "source": "work", "target": "/work"}}
+			document["volumes"] = map[string]any{"work": map[string]any{}}
+		}
 		if docker.platform != "" {
 			service["platform"] = docker.platform
 		}
-		return json.Marshal(map[string]any{"services": map[string]any{"worker": service}})
+		return json.Marshal(document)
+	}
+	if len(args) >= 2 && (args[0] == "network" || args[0] == "volume") && args[1] == "create" {
+		docker.reservationCalls = append(docker.reservationCalls, append([]string(nil), args...))
+		if docker.reservedLabels == nil {
+			docker.reservedLabels = make(map[string]map[string]string)
+		}
+		labels := make(map[string]string)
+		for index := 0; index+1 < len(args); index++ {
+			if args[index] == "--label" {
+				key, value, ok := strings.Cut(args[index+1], "=")
+				if ok {
+					labels[key] = value
+				}
+			}
+		}
+		docker.reservedLabels[args[0]] = labels
+		if docker.lateCollision && args[0] == "volume" {
+			docker.collisionVisible = true
+			return nil, errors.New("docker create name conflict")
+		}
+		return []byte(args[len(args)-1] + "\n"), nil
+	}
+	if len(args) >= 2 && (args[0] == "network" || args[0] == "volume") && args[1] == "inspect" {
+		if docker.collisionVisible && args[0] == "volume" {
+			return []byte(`{}`), nil
+		}
+		if docker.reservationMismatch == args[0] {
+			return []byte(`{}`), nil
+		}
+		return json.Marshal(docker.reservedLabels[args[0]])
+	}
+	if len(args) >= 2 && (args[0] == "network" || args[0] == "volume") && args[1] == "ls" && strings.Contains(strings.Join(args, " "), "name=^") {
+		if docker.collisionVisible && args[0] == "volume" {
+			return []byte("unrelated-resource\n"), nil
+		}
+		return nil, nil
 	}
 	if containsSequence(args, "image", "inspect") {
 		docker.imageInspectCall = append([]string(nil), args...)
@@ -144,11 +193,25 @@ func (docker *runnerDocker) run(ctx context.Context, _ int64, args ...string) ([
 			Services map[string]struct {
 				Image string `json:"image"`
 			} `json:"services"`
+			Networks map[string]struct {
+				External bool   `json:"external"`
+				Name     string `json:"name"`
+			} `json:"networks"`
+			Volumes map[string]struct {
+				External bool   `json:"external"`
+				Name     string `json:"name"`
+			} `json:"volumes"`
 		}
 		if err := json.Unmarshal(data, &snapshot); err != nil {
 			return nil, err
 		}
 		docker.upSnapshotImage = snapshot.Services["worker"].Image
+		for _, resource := range snapshot.Networks {
+			docker.upReservedNetwork = resource.External && resource.Name != ""
+		}
+		for _, resource := range snapshot.Volumes {
+			docker.upReservedVolume = resource.External && resource.Name != ""
+		}
 		if docker.cancel != nil {
 			docker.cancel()
 			return nil, context.Canceled
@@ -160,6 +223,58 @@ func (docker *runnerDocker) run(ctx context.Context, _ int64, args ...string) ([
 		docker.cleanupContextErr = ctx.Err()
 	}
 	return nil, nil
+}
+
+func TestRunnerAtomicallyReservesGeneratedResourcesBeforeComposeUp(t *testing.T) {
+	command := &runnerDocker{includeVolume: true}
+	runner := testRunner(t, command, &recordingCleanupJournal{})
+	request := testRunnerRequest("run-reserved-resources", time.Minute)
+	if _, err := runner.Run(context.Background(), request, func(context.Context, Instance) error { return nil }); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if len(command.reservationCalls) != 2 {
+		t.Fatalf("resource reservation calls = %v, want one network and one volume", command.reservationCalls)
+	}
+	identity, _ := newIdentity(request.RunID)
+	for _, kind := range []string{"network", "volume"} {
+		if !labelsContain(command.reservedLabels[kind], identity.labels()) {
+			t.Fatalf("%s reservation labels = %#v, want exact run ownership", kind, command.reservedLabels[kind])
+		}
+	}
+	if !command.upReservedNetwork || !command.upReservedVolume {
+		t.Fatalf("Compose up snapshot did not use only reserved external resources: network=%t volume=%t", command.upReservedNetwork, command.upReservedVolume)
+	}
+}
+
+func TestRunnerRejectsLateUnlabeledReservationCollisionBeforeStartingContainers(t *testing.T) {
+	command := &runnerDocker{includeVolume: true, lateCollision: true}
+	runner := testRunner(t, command, &recordingCleanupJournal{})
+	callbackCalled := false
+	_, err := runner.Run(context.Background(), testRunnerRequest("run-late-reservation-collision", time.Minute), func(context.Context, Instance) error {
+		callbackCalled = true
+		return nil
+	})
+	if !errors.Is(err, ErrProjectCollision) {
+		t.Fatalf("Run error = %v, want ErrProjectCollision", err)
+	}
+	if callbackCalled || command.upCall != nil {
+		t.Fatal("runner started containers after a late unlabeled resource collision")
+	}
+}
+
+func TestRunnerRejectsReservationWhoseImmediateOwnershipVerificationMismatches(t *testing.T) {
+	command := &runnerDocker{includeVolume: true, reservationMismatch: "network"}
+	runner := testRunner(t, command, &recordingCleanupJournal{})
+	_, err := runner.Run(context.Background(), testRunnerRequest("run-reservation-verification", time.Minute), func(context.Context, Instance) error {
+		t.Fatal("callback ran after reservation ownership mismatch")
+		return nil
+	})
+	if !errors.Is(err, ErrProjectCollision) {
+		t.Fatalf("Run error = %v, want ErrProjectCollision", err)
+	}
+	if command.upCall != nil {
+		t.Fatal("runner started containers before every reservation verified")
+	}
 }
 
 func TestRunnerPinsSelectedPlatformImageBeforeMutableTagChanges(t *testing.T) {

@@ -47,6 +47,7 @@ type mutationDocker struct {
 	configCalls int
 	rendered    []byte
 	upObserved  bool
+	labels      map[string]map[string]string
 }
 
 func (docker *mutationDocker) run(_ context.Context, _ int64, args ...string) ([]byte, error) {
@@ -76,6 +77,25 @@ func (docker *mutationDocker) run(_ context.Context, _ int64, args ...string) ([
 	if containsSequence(args, "image", "inspect") {
 		return []byte(`{"id":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","os":"linux","architecture":"amd64","variant":"","volumes":null}`), nil
 	}
+	if len(args) >= 2 && (args[0] == "network" || args[0] == "volume") && args[1] == "create" {
+		if docker.labels == nil {
+			docker.labels = make(map[string]map[string]string)
+		}
+		labels := make(map[string]string)
+		for index := 0; index+1 < len(args); index++ {
+			if args[index] == "--label" {
+				key, value, ok := strings.Cut(args[index+1], "=")
+				if ok {
+					labels[key] = value
+				}
+			}
+		}
+		docker.labels[args[0]] = labels
+		return []byte(args[len(args)-1] + "\n"), nil
+	}
+	if len(args) >= 2 && (args[0] == "network" || args[0] == "volume") && args[1] == "inspect" {
+		return json.Marshal(docker.labels[args[0]])
+	}
 	if containsSequence(args, "up", "--detach") {
 		docker.upObserved = true
 		if err := os.WriteFile(docker.source, []byte("services:\n  worker:\n    privileged: true\n"), 0o600); err != nil {
@@ -100,6 +120,18 @@ func (docker *mutationDocker) run(_ context.Context, _ int64, args ...string) ([
 		want, err := rewriteSnapshotImages(escapeSnapshotInterpolation(docker.rendered), map[string]string{"worker": testImageID})
 		if err != nil {
 			docker.t.Fatalf("build expected pinned snapshot: %v", err)
+		}
+		var model composeModel
+		if err := json.Unmarshal(want, &model); err != nil {
+			docker.t.Fatalf("decode expected pinned snapshot: %v", err)
+		}
+		identity, err := newIdentity("run-immutable-snapshot")
+		if err != nil {
+			docker.t.Fatalf("build expected identity: %v", err)
+		}
+		want, err = rewriteSnapshotReservedResources(want, identity, model)
+		if err != nil {
+			docker.t.Fatalf("build expected reserved snapshot: %v", err)
 		}
 		if !bytes.Equal(actual, want) {
 			docker.t.Fatal("validated and executed snapshot bytes differ")

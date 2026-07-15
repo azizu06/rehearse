@@ -137,8 +137,19 @@ func (runner *DockerRunner) Run(
 	if err != nil {
 		return instance, fmt.Errorf("validate service image volume policy: %w", err)
 	}
-	if _, err := parseAndValidateSnapshot(snapshotData, normalized.identity, normalized.Limits); err != nil {
+	snapshotModel, err = parseAndValidateSnapshot(snapshotData, normalized.identity, normalized.Limits)
+	if err != nil {
 		return instance, fmt.Errorf("validate pinned Compose snapshot: %w", err)
+	}
+	if err := reserveComposeResources(runContext, runner.command, normalized.identity, snapshotModel); err != nil {
+		return instance, err
+	}
+	snapshotData, err = rewriteSnapshotReservedResources(snapshotData, normalized.identity, snapshotModel)
+	if err != nil {
+		return instance, err
+	}
+	if _, err := parseAndValidateReservedSnapshot(snapshotData, normalized.identity, normalized.Limits); err != nil {
+		return instance, fmt.Errorf("validate reserved Compose snapshot: %w", err)
 	}
 	snapshotPath, err := writeSnapshotFile(snapshotDirectory, snapshotFileName, snapshotData)
 	if err != nil {

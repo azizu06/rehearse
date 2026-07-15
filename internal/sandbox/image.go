@@ -10,7 +10,7 @@ import (
 	"strings"
 )
 
-const imageMetadataFormat = `{"id":{{json .Id}},"os":{{json .Os}},"architecture":{{json .Architecture}},"variant":{{json .Variant}},"volumes":{{json .Config.Volumes}}}`
+const imageMetadataFormat = `{"id":{{json .Id}},"os":{{json .Os}},"architecture":{{json .Architecture}},"variant":{{json .Variant}},"volumes":{{json (index .Config "Volumes")}}}`
 
 var immutableImageIDPattern = regexp.MustCompile(`^sha256:[a-f0-9]{64}$`)
 

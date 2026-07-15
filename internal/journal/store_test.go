@@ -3,8 +3,10 @@ package journal_test
 import (
 	"bytes"
 	"context"
+	"database/sql"
 	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"sync"
 	"sync/atomic"
@@ -14,6 +16,117 @@ import (
 	"github.com/azizu06/rehearse/internal/drill"
 	"github.com/azizu06/rehearse/internal/journal"
 )
+
+func TestJournalOwnershipExcludesLiveProcessAndReleasesAfterCrash(t *testing.T) {
+	ctx := context.Background()
+	directory := t.TempDir()
+	path := filepath.Join(directory, "rehearse.db")
+	readyPath := filepath.Join(directory, "ready")
+	command := exec.Command(os.Args[0], "-test.run=^TestJournalOwnershipHelper$")
+	command.Env = append(os.Environ(),
+		"REHEARSE_JOURNAL_OWNER_HELPER=1",
+		"REHEARSE_JOURNAL_OWNER_DB="+path,
+		"REHEARSE_JOURNAL_OWNER_READY="+readyPath,
+	)
+	if err := command.Start(); err != nil {
+		t.Fatalf("start journal owner helper: %v", err)
+	}
+	killAndWait := func() {
+		if command.Process != nil {
+			_ = command.Process.Kill()
+		}
+		_ = command.Wait()
+	}
+	t.Cleanup(killAndWait)
+
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		if _, err := os.Stat(readyPath); err == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("journal owner helper did not become ready")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	second, err := journal.Open(ctx, path)
+	if second != nil {
+		_ = second.Close()
+	}
+	if !errors.Is(err, journal.ErrJournalOwned) {
+		t.Fatalf("second Open error = %v, want ErrJournalOwned", err)
+	}
+	aliasPath := filepath.Join(directory, "journal-alias.db")
+	if err := os.Symlink(path, aliasPath); err != nil {
+		t.Fatalf("create journal path alias: %v", err)
+	}
+	aliased, err := journal.Open(ctx, aliasPath)
+	if aliased != nil {
+		_ = aliased.Close()
+	}
+	if !errors.Is(err, journal.ErrJournalOwned) {
+		t.Fatalf("aliased Open error = %v, want ErrJournalOwned", err)
+	}
+
+	database, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatalf("open read-only ownership evidence connection: %v", err)
+	}
+	defer func() { _ = database.Close() }()
+	var claimStatus string
+	if err := database.QueryRowContext(ctx, `SELECT status FROM sandbox_cleanup_claims WHERE run_id = 'run-owned'`).Scan(&claimStatus); err != nil {
+		t.Fatalf("read live owner claim: %v", err)
+	}
+	if claimStatus != "pending" {
+		t.Fatalf("live owner claim status = %q, want pending", claimStatus)
+	}
+	if err := database.Close(); err != nil {
+		t.Fatalf("close ownership evidence connection: %v", err)
+	}
+
+	killAndWait()
+	reopened, err := journal.Open(ctx, path)
+	if err != nil {
+		t.Fatalf("Open after owner crash: %v", err)
+	}
+	t.Cleanup(func() { _ = reopened.Close() })
+	runs, err := reopened.RunsNeedingReconciliation(ctx)
+	if err != nil {
+		t.Fatalf("RunsNeedingReconciliation: %v", err)
+	}
+	if len(runs) != 1 || runs[0].ID != "run-owned" {
+		t.Fatalf("reconciliation queue after owner crash = %#v, want run-owned", runs)
+	}
+}
+
+func TestJournalOwnershipHelper(t *testing.T) {
+	if os.Getenv("REHEARSE_JOURNAL_OWNER_HELPER") != "1" {
+		t.Skip("journal ownership subprocess helper")
+	}
+	ctx := context.Background()
+	store, err := journal.Open(ctx, os.Getenv("REHEARSE_JOURNAL_OWNER_DB"))
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	now := time.Now().UTC()
+	plan := testPlan(now)
+	if err := store.CreatePlan(ctx, plan); err != nil {
+		t.Fatalf("CreatePlan: %v", err)
+	}
+	if _, err := store.CreateRun(ctx, "run-owned", plan.ID, plan.Version, now); err != nil {
+		t.Fatalf("CreateRun: %v", err)
+	}
+	if err := store.ClaimSandboxCleanup(ctx, "run-owned", now.Add(time.Second)); err != nil {
+		t.Fatalf("ClaimSandboxCleanup: %v", err)
+	}
+	if err := os.WriteFile(os.Getenv("REHEARSE_JOURNAL_OWNER_READY"), []byte("ready"), 0o600); err != nil {
+		t.Fatalf("write ready file: %v", err)
+	}
+	for {
+		time.Sleep(time.Hour)
+	}
+}
 
 func TestJournalPersistsCompletedDrillHistoryAcrossRestart(t *testing.T) {
 	t.Parallel()
