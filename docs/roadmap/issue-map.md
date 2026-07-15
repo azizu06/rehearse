@@ -15,7 +15,7 @@ The live [GitHub Project](https://github.com/users/azizu06/projects/4) is author
 | [#13](https://github.com/azizu06/rehearse/issues/13) | Scheduling + Prometheus/Grafana | #6, #11, #12 | v0.1 |
 | [#14](https://github.com/azizu06/rehearse/issues/14) | RabbitMQ/PostgreSQL reference workload | #11 | v0.1 |
 | [#15](https://github.com/azizu06/rehearse/issues/15) | Public v0.1 package and release | #12-#14 | v0.1 |
-| [#16](https://github.com/azizu06/rehearse/issues/16) | Local/S3/command source adapters | #7, #11 | v1.0 |
+| [#16](https://github.com/azizu06/rehearse/issues/16) | Plain local/S3 object + command sources | #7, #11 | v1.0 |
 | [#17](https://github.com/azizu06/rehearse/issues/17) | MySQL/SQLite/command targets | #9, #11 | v1.0 |
 | [#18](https://github.com/azizu06/rehearse/issues/18) | Reliability and security hardening | #11, #12 | v1.0 |
 | [#19](https://github.com/azizu06/rehearse/issues/19) | CI mode + JSON/JUnit | #11, #12 | v1.0 |
