@@ -351,13 +351,72 @@ printf '%s\n' '`+test.summary+`'
 	}
 }
 
-func TestAcquirePromotesEmptyRestoreWithSummaryMarker(t *testing.T) {
+func TestAcquireRejectsInvalidStatusBeforePromotion(t *testing.T) {
+	t.Parallel()
+
+	const recoveryPointID = "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"
+	tests := []struct {
+		name   string
+		status string
+	}{
+		{name: "percent done null", status: `{"message_type":"status","percent_done":null}`},
+		{name: "files restored null", status: `{"message_type":"status","files_restored":null}`},
+		{name: "total files null", status: `{"message_type":"status","total_files":null}`},
+		{name: "bytes restored null", status: `{"message_type":"status","bytes_restored":null}`},
+		{name: "total bytes null", status: `{"message_type":"status","total_bytes":null}`},
+		{name: "percent done wrong type", status: `{"message_type":"status","percent_done":"0"}`},
+		{name: "files restored wrong type", status: `{"message_type":"status","files_restored":"0"}`},
+		{name: "total files wrong type", status: `{"message_type":"status","total_files":false}`},
+		{name: "bytes restored wrong type", status: `{"message_type":"status","bytes_restored":0.5}`},
+		{name: "total bytes wrong type", status: `{"message_type":"status","total_bytes":[]}`},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+
+			workspace := t.TempDir()
+			credentialTempDir := t.TempDir()
+			binary := writeFakeResticScript(t, `
+target=""
+while test "$#" -gt 0; do
+  if test "$1" = "--target"; then target="$2"; shift; fi
+  shift
+done
+mkdir -p "$target/private"
+printf 'partial-private-content' > "$target/private/item"
+printf '%s\n' '`+test.status+`'
+printf '%s\n' '{"message_type":"summary"}'
+`)
+			adapter := newTestAdapter(t, resticadapter.Config{
+				Binary:            binary,
+				Repository:        resticadapter.Repository{Kind: resticadapter.RepositoryLocal, Location: t.TempDir()},
+				Password:          drill.CredentialReference{Provider: drill.CredentialEnvironment, Locator: "REHEARSE_TEST_RESTIC_PASSWORD"},
+				CredentialTempDir: credentialTempDir,
+			})
+
+			_, err := adapter.Acquire(context.Background(), source.AcquireRequest{
+				RecoveryPointID: recoveryPointID,
+				Workspace:       workspace,
+			})
+			var failure *source.Failure
+			if !errors.As(err, &failure) || failure.Kind != source.FailureCorruptOutput {
+				t.Fatalf("failure = %+v, want corrupt output", failure)
+			}
+			assertDirectoryEmpty(t, workspace)
+			assertDirectoryEmpty(t, credentialTempDir)
+		})
+	}
+}
+
+func TestAcquirePromotesEmptyRestoreWithOmittedZeroCounters(t *testing.T) {
 	t.Parallel()
 
 	const recoveryPointID = "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"
 	credentialTempDir := t.TempDir()
 	adapter := newTestAdapter(t, resticadapter.Config{
 		Binary: writeFakeResticScript(t, `
+printf '%s\n' '{"message_type":"status"}'
 printf '%s\n' '{"message_type":"summary"}'
 `),
 		Repository:        resticadapter.Repository{Kind: resticadapter.RepositoryLocal, Location: t.TempDir()},
@@ -994,6 +1053,35 @@ func TestCapabilitiesRequiresStructuredResticVersionAtLeast018(t *testing.T) {
 				t.Fatalf("unexpected capabilities: %+v", capabilities)
 			}
 		})
+	}
+}
+
+func TestCapabilitiesDoesNotInheritParentEnvironment(t *testing.T) {
+	const sentinel = "must-not-reach-restic-version"
+	t.Setenv("REHEARSE_PREFLIGHT_SENTINEL", sentinel)
+	t.Setenv("REHEARSE_TEST_RESTIC_PASSWORD", sentinel)
+	t.Setenv("AWS_ACCESS_KEY_ID", sentinel)
+	t.Setenv("AWS_SECRET_ACCESS_KEY", sentinel)
+
+	adapter := newTestAdapter(t, resticadapter.Config{
+		Binary: writeFakeResticScript(t, `
+test -z "${REHEARSE_PREFLIGHT_SENTINEL:-}" || exit 91
+test -z "${REHEARSE_TEST_RESTIC_PASSWORD:-}" || exit 92
+test -z "${AWS_ACCESS_KEY_ID:-}" || exit 93
+test -z "${AWS_SECRET_ACCESS_KEY:-}" || exit 94
+printf '%s\n' '{"message_type":"version","version":"0.19.1"}'
+`),
+		Repository:        resticadapter.Repository{Kind: resticadapter.RepositoryLocal, Location: t.TempDir()},
+		Password:          drill.CredentialReference{Provider: drill.CredentialEnvironment, Locator: "REHEARSE_TEST_RESTIC_PASSWORD"},
+		CredentialTempDir: t.TempDir(),
+	})
+
+	capabilities, err := adapter.Capabilities(context.Background())
+	if err != nil {
+		t.Fatalf("capabilities: %v", err)
+	}
+	if capabilities.AdapterVersion != "restic/0.19.1" {
+		t.Fatalf("adapter version = %q, want restic/0.19.1", capabilities.AdapterVersion)
 	}
 }
 

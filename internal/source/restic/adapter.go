@@ -159,7 +159,7 @@ type versionMessage struct {
 
 // Capabilities preflights the executable and its structured-output contract.
 func (adapter *Adapter) Capabilities(ctx context.Context) (source.Capabilities, error) {
-	stdout, _, err := adapter.run(ctx, "preflight", nil, "version", "--json")
+	stdout, _, err := adapter.run(ctx, "preflight", []string{"LANG=C", "LC_ALL=C"}, "version", "--json")
 	if err != nil {
 		return source.Capabilities{}, err
 	}
@@ -447,12 +447,12 @@ type restoreEnvelope struct {
 }
 
 type restoreStatus struct {
-	MessageType   string  `json:"message_type"`
-	PercentDone   float64 `json:"percent_done"`
-	FilesRestored uint64  `json:"files_restored"`
-	TotalFiles    uint64  `json:"total_files"`
-	BytesRestored uint64  `json:"bytes_restored"`
-	TotalBytes    uint64  `json:"total_bytes"`
+	MessageType   string          `json:"message_type"`
+	PercentDone   restoreFraction `json:"percent_done"`
+	FilesRestored restoreCounter  `json:"files_restored"`
+	TotalFiles    restoreCounter  `json:"total_files"`
+	BytesRestored restoreCounter  `json:"bytes_restored"`
+	TotalBytes    restoreCounter  `json:"total_bytes"`
 }
 
 type restoreSummary struct {
@@ -467,6 +467,8 @@ type restoreSummary struct {
 // while rejecting an explicit null or any non-uint64 representation.
 type restoreCounter uint64
 
+type restoreFraction float64
+
 func (counter *restoreCounter) UnmarshalJSON(data []byte) error {
 	if bytes.Equal(bytes.TrimSpace(data), []byte("null")) {
 		return errors.New("restore counter must not be null")
@@ -476,6 +478,18 @@ func (counter *restoreCounter) UnmarshalJSON(data []byte) error {
 		return err
 	}
 	*counter = restoreCounter(value)
+	return nil
+}
+
+func (fraction *restoreFraction) UnmarshalJSON(data []byte) error {
+	if bytes.Equal(bytes.TrimSpace(data), []byte("null")) {
+		return errors.New("restore fraction must not be null")
+	}
+	var value float64
+	if err := json.Unmarshal(data, &value); err != nil {
+		return err
+	}
+	*fraction = restoreFraction(value)
 	return nil
 }
 
@@ -604,7 +618,7 @@ func (adapter *Adapter) runRestore(
 		switch envelope.MessageType {
 		case "status":
 			var status restoreStatus
-			if err := json.Unmarshal(raw, &status); err != nil || status.PercentDone < lastPercent || status.PercentDone < 0 || status.PercentDone > 1 || status.FilesRestored > status.TotalFiles || status.BytesRestored > status.TotalBytes {
+			if err := json.Unmarshal(raw, &status); err != nil {
 				cancel()
 				_ = command.Wait()
 				if ctx.Err() != nil {
@@ -612,14 +626,23 @@ func (adapter *Adapter) runRestore(
 				}
 				return &source.Failure{Kind: source.FailureCorruptOutput, Operation: "acquire", SafeHint: "restic returned invalid restore progress"}
 			}
-			lastPercent = status.PercentDone
+			percentDone := float64(status.PercentDone)
+			if percentDone < lastPercent || percentDone < 0 || percentDone > 1 || status.FilesRestored > status.TotalFiles || status.BytesRestored > status.TotalBytes {
+				cancel()
+				_ = command.Wait()
+				if ctx.Err() != nil {
+					return contextFailure("acquire", ctx.Err())
+				}
+				return &source.Failure{Kind: source.FailureCorruptOutput, Operation: "acquire", SafeHint: "restic returned invalid restore progress"}
+			}
+			lastPercent = percentDone
 			if report != nil {
 				report(source.Progress{
-					PercentDone: status.PercentDone,
-					FilesDone:   status.FilesRestored,
-					TotalFiles:  status.TotalFiles,
-					BytesDone:   status.BytesRestored,
-					TotalBytes:  status.TotalBytes,
+					PercentDone: percentDone,
+					FilesDone:   uint64(status.FilesRestored),
+					TotalFiles:  uint64(status.TotalFiles),
+					BytesDone:   uint64(status.BytesRestored),
+					TotalBytes:  uint64(status.TotalBytes),
 				})
 			}
 		case "summary":
