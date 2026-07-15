@@ -81,6 +81,7 @@ type Adapter struct {
 
 // New validates static adapter configuration without resolving credentials.
 func New(config Config, resolver source.CredentialResolver) (*Adapter, error) {
+	config = snapshotConfig(config)
 	if resolver == nil {
 		return nil, &source.Failure{Kind: source.FailureInvalidInput, Operation: "configure", SafeHint: "a credential resolver is required"}
 	}
@@ -139,6 +140,19 @@ func New(config Config, resolver source.CredentialResolver) (*Adapter, error) {
 		return nil, &source.Failure{Kind: source.FailureInvalidInput, Operation: "configure", SafeHint: "restic output limits exceed the supported maximum"}
 	}
 	return &Adapter{config: config, resolver: resolver, preflightGate: make(chan struct{}, 1)}, nil
+}
+
+func snapshotConfig(config Config) Config {
+	if config.S3Credentials == nil {
+		return config
+	}
+	credentials := *config.S3Credentials
+	if credentials.SessionToken != nil {
+		sessionToken := *credentials.SessionToken
+		credentials.SessionToken = &sessionToken
+	}
+	config.S3Credentials = &credentials
+	return config
 }
 
 func validateRepository(repository Repository) error {
@@ -607,16 +621,26 @@ func decodeVersionMessage(raw []byte) (string, error) {
 }
 
 func decodeResticMessageType(raw json.RawMessage) (string, error) {
-	var object map[string]json.RawMessage
-	if err := json.Unmarshal(raw, &object); err != nil {
+	members, ok := decodeJSONObjectMembers(raw)
+	if !ok {
 		return "", errInvalidResticMessageType
 	}
-	encoded, ok := object["message_type"]
-	if !ok || bytes.Equal(bytes.TrimSpace(encoded), []byte("null")) {
+	var encoded json.RawMessage
+	messageTypeCount := 0
+	alternateMessageType := false
+	for _, member := range members {
+		if member.name == "message_type" {
+			messageTypeCount++
+			encoded = member.value
+		} else {
+			alternateMessageType = alternateMessageType || strings.EqualFold(member.name, "message_type")
+		}
+	}
+	if messageTypeCount != 1 || alternateMessageType {
 		return "", errInvalidResticMessageType
 	}
-	var messageType string
-	if err := json.Unmarshal(encoded, &messageType); err != nil {
+	messageType, ok := decodeJSONString(encoded)
+	if !ok {
 		return "", errInvalidResticMessageType
 	}
 	return messageType, nil

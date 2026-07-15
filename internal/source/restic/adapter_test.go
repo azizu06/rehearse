@@ -330,6 +330,70 @@ chmod 0000 "$(dirname "$RESTIC_PASSWORD_FILE")"
 	assertDirectoryEmpty(t, credentialTempDir)
 }
 
+func TestNewSnapshotsCallerOwnedS3CredentialReferences(t *testing.T) {
+	adapter, credentials, sessionToken, credentialTempDir := newS3SnapshotTestAdapter(t)
+	const privateMutationMarker = "private-mutated-reference"
+	credentials.AccessKeyID = drill.CredentialReference{Provider: drill.CredentialEnvironment, Locator: privateMutationMarker + "-access"}
+	credentials.SecretAccessKey = drill.CredentialReference{Provider: drill.CredentialEnvironment, Locator: privateMutationMarker + "-secret"}
+	*sessionToken = drill.CredentialReference{Provider: drill.CredentialEnvironment, Locator: privateMutationMarker + "-original-session"}
+	replacement := drill.CredentialReference{Provider: drill.CredentialEnvironment, Locator: privateMutationMarker + "-replacement-session"}
+	credentials.SessionToken = &replacement
+
+	points, err := adapter.ListRecoveryPoints(context.Background())
+	if err != nil {
+		if strings.Contains(err.Error(), privateMutationMarker) || strings.Contains(err.Error(), "snapshot-secret-value") {
+			t.Fatalf("caller mutation data leaked through error: %v", err)
+		}
+		t.Fatalf("list with snapshotted credentials: %v", err)
+	}
+	if len(points) != 0 {
+		t.Fatalf("unexpected recovery points: %+v", points)
+	}
+	assertDirectoryEmpty(t, credentialTempDir)
+}
+
+func TestS3CredentialSnapshotDoesNotRaceCallerMutation(t *testing.T) {
+	adapter, credentials, sessionToken, credentialTempDir := newS3SnapshotTestAdapter(t)
+	stop := make(chan struct{})
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		firstSession := drill.CredentialReference{Provider: drill.CredentialEnvironment, Locator: "MUTATED_SESSION_A"}
+		secondSession := drill.CredentialReference{Provider: drill.CredentialEnvironment, Locator: "MUTATED_SESSION_B"}
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+				credentials.AccessKeyID = drill.CredentialReference{Provider: drill.CredentialEnvironment, Locator: "MUTATED_ACCESS_A"}
+				credentials.SecretAccessKey = drill.CredentialReference{Provider: drill.CredentialEnvironment, Locator: "MUTATED_SECRET_A"}
+				credentials.SessionToken = &firstSession
+				*sessionToken = secondSession
+				credentials.AccessKeyID = drill.CredentialReference{Provider: drill.CredentialEnvironment, Locator: "MUTATED_ACCESS_B"}
+				credentials.SecretAccessKey = drill.CredentialReference{Provider: drill.CredentialEnvironment, Locator: "MUTATED_SECRET_B"}
+				credentials.SessionToken = &secondSession
+			}
+		}
+	}()
+
+	var listErr error
+	for range 8 {
+		_, listErr = adapter.ListRecoveryPoints(context.Background())
+		if listErr != nil {
+			break
+		}
+	}
+	close(stop)
+	<-done
+	if listErr != nil {
+		if strings.Contains(listErr.Error(), "snapshot-secret-value") || strings.Contains(listErr.Error(), "MUTATED_") {
+			t.Fatalf("credential data leaked through error: %v", listErr)
+		}
+		t.Fatalf("list during caller mutation: %v", listErr)
+	}
+	assertDirectoryEmpty(t, credentialTempDir)
+}
+
 func TestAcquireStagesSelectedSnapshotAndReportsAggregateProgress(t *testing.T) {
 	t.Parallel()
 
@@ -437,6 +501,8 @@ func TestAcquireRejectsInvalidOrMissingSummaryBeforePromotion(t *testing.T) {
 		{name: "total bytes wrong type", summary: `{"message_type":"summary","total_bytes":[]}`},
 		{name: "files exceed total", summary: `{"message_type":"summary","files_restored":1}`},
 		{name: "bytes exceed total", summary: `{"message_type":"summary","bytes_restored":1}`},
+		{name: "duplicate discriminator promotes summary", summary: `{"message_type":"future","message_type":"summary"}`},
+		{name: "case-confusable discriminator", summary: `{"message_type":"summary","Message_Type":"future"}`},
 	}
 
 	for _, test := range tests {
@@ -479,23 +545,33 @@ printf '%s\n' '`+test.summary+`'
 func TestAcquireRejectsKnownMessagesAfterSummary(t *testing.T) {
 	const recoveryPointID = "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"
 	tests := []struct {
-		name   string
-		output string
+		name     string
+		output   string
+		safeHint string
 	}{
 		{
 			name: "duplicate summary",
 			output: `printf '%s\n' '{"message_type":"summary"}'
 printf '%s\n' '{"message_type":"summary"}'`,
+			safeHint: "restic returned invalid restore completion sequence",
 		},
 		{
 			name: "status after summary",
 			output: `printf '%s\n' '{"message_type":"summary"}'
 printf '%s\n' '{"message_type":"status"}'`,
+			safeHint: "restic returned invalid restore completion sequence",
 		},
 		{
 			name: "error after summary",
 			output: `printf '%s\n' '{"message_type":"summary"}'
 printf '%s\n' '{"message_type":"error"}'`,
+			safeHint: "restic returned invalid restore completion sequence",
+		},
+		{
+			name: "duplicate discriminator hides status after summary",
+			output: `printf '%s\n' '{"message_type":"summary"}'
+printf '%s\n' '{"message_type":"status","message_type":"future"}'`,
+			safeHint: "restic returned invalid restore JSON",
 		},
 	}
 
@@ -523,8 +599,8 @@ printf 'partial-private-content' > "$target/item"
 				Workspace:       workspace,
 			})
 			var failure *source.Failure
-			if !errors.As(err, &failure) || failure.Kind != source.FailureCorruptOutput || failure.SafeHint != "restic returned invalid restore completion sequence" {
-				t.Fatalf("failure = %+v, want invalid completion sequence", failure)
+			if !errors.As(err, &failure) || failure.Kind != source.FailureCorruptOutput || failure.SafeHint != test.safeHint {
+				t.Fatalf("failure = %+v, want corrupt output with hint %q", failure, test.safeHint)
 			}
 			assertDirectoryEmpty(t, workspace)
 			assertDirectoryEmpty(t, credentialTempDir)
@@ -1971,6 +2047,59 @@ exec `+shellQuote(originalBinary)+` "$@"
 		t.Fatalf("preflight test adapter: %v", err)
 	}
 	return adapter
+}
+
+func newS3SnapshotTestAdapter(t *testing.T) (*resticadapter.Adapter, *resticadapter.S3Credentials, *drill.CredentialReference, string) {
+	t.Helper()
+	credentialTempDir := t.TempDir()
+	binary := writeFakeResticScript(t, `
+if test "${1:-}" = "version"; then
+  printf '%s\n' '{"message_type":"version","version":"0.19.1"}'
+  exit 0
+fi
+grep -q '^aws_access_key_id = snapshot-access-value$' "$AWS_SHARED_CREDENTIALS_FILE" || exit 91
+grep -q '^aws_secret_access_key = snapshot-secret-value$' "$AWS_SHARED_CREDENTIALS_FILE" || exit 92
+grep -q '^aws_session_token = snapshot-session-value$' "$AWS_SHARED_CREDENTIALS_FILE" || exit 93
+printf '%s\n' '[]'
+`)
+	sessionToken := &drill.CredentialReference{Provider: drill.CredentialEnvironment, Locator: "SNAPSHOT_SESSION"}
+	credentials := &resticadapter.S3Credentials{
+		AccessKeyID:     drill.CredentialReference{Provider: drill.CredentialEnvironment, Locator: "SNAPSHOT_ACCESS"},
+		SecretAccessKey: drill.CredentialReference{Provider: drill.CredentialEnvironment, Locator: "SNAPSHOT_SECRET"},
+		SessionToken:    sessionToken,
+	}
+	values := map[string]string{
+		"PASSWORD":          "snapshot-password-value",
+		"SNAPSHOT_ACCESS":   "snapshot-access-value",
+		"SNAPSHOT_SECRET":   "snapshot-secret-value",
+		"SNAPSHOT_SESSION":  "snapshot-session-value",
+		"MUTATED_ACCESS_A":  "snapshot-access-value",
+		"MUTATED_ACCESS_B":  "snapshot-access-value",
+		"MUTATED_SECRET_A":  "snapshot-secret-value",
+		"MUTATED_SECRET_B":  "snapshot-secret-value",
+		"MUTATED_SESSION_A": "snapshot-session-value",
+		"MUTATED_SESSION_B": "snapshot-session-value",
+	}
+	adapter, err := resticadapter.New(resticadapter.Config{
+		Binary:            binary,
+		Repository:        resticadapter.Repository{Kind: resticadapter.RepositoryS3, Location: "s3:http://minio.test/rehearse/snapshot"},
+		Password:          drill.CredentialReference{Provider: drill.CredentialEnvironment, Locator: "PASSWORD"},
+		S3Credentials:     credentials,
+		CredentialTempDir: credentialTempDir,
+	}, credentialResolver(func(_ context.Context, reference drill.CredentialReference) ([]byte, error) {
+		value, ok := values[reference.Locator]
+		if !ok {
+			return nil, errors.New("credential reference unavailable")
+		}
+		return []byte(value), nil
+	}))
+	if err != nil {
+		t.Fatalf("new snapshot adapter: %v", err)
+	}
+	if _, err := adapter.Capabilities(context.Background()); err != nil {
+		t.Fatalf("preflight snapshot adapter: %v", err)
+	}
+	return adapter, credentials, sessionToken, credentialTempDir
 }
 
 func shellQuote(value string) string {

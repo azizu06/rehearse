@@ -91,6 +91,10 @@ func FuzzDecodeResticMessageType(f *testing.F) {
 	f.Add([]byte(`{"message_type":null,"private":"` + fuzzPrivateMarker + `"}`))
 	f.Add([]byte(`{"message_type":false,"private":"` + fuzzPrivateMarker + `"}`))
 	f.Add([]byte(`{"messAge_tYpe":"future_message"}`))
+	f.Add([]byte(`{"message_type":"future","message_type":"summary"}`))
+	f.Add([]byte(`{"message_type":"summary","Message_Type":"future"}`))
+	f.Add([]byte(`{"message_type":[]}`))
+	f.Add([]byte(`{"message_type":"future_message","future":{"nested":[1,2]}}`))
 
 	f.Fuzz(func(t *testing.T, data []byte) {
 		messageType, err := decodeResticMessageType(data)
@@ -104,19 +108,50 @@ func FuzzDecodeResticMessageType(f *testing.F) {
 			return
 		}
 
-		var object map[string]json.RawMessage
-		if err := json.Unmarshal(data, &object); err != nil {
-			t.Fatalf("decoder accepted non-object JSON: %q", data)
-		}
-		raw, ok := object["message_type"]
-		if !ok {
-			t.Fatalf("decoder accepted missing message_type: %q", data)
-		}
-		var want string
-		if err := json.Unmarshal(raw, &want); err != nil || messageType != want {
+		want, ok := independentlyValidMessageType(data)
+		if !ok || messageType != want {
 			t.Fatalf("message_type = %q, want valid string %q", messageType, want)
 		}
 	})
+}
+
+func independentlyValidMessageType(data []byte) (string, bool) {
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	token, err := decoder.Token()
+	if err != nil || token != json.Delim('{') {
+		return "", false
+	}
+	messageTypeCount := 0
+	alternateMessageType := false
+	var messageType any
+	for decoder.More() {
+		token, err := decoder.Token()
+		if err != nil {
+			return "", false
+		}
+		name, ok := token.(string)
+		if !ok {
+			return "", false
+		}
+		var value any
+		if err := decoder.Decode(&value); err != nil {
+			return "", false
+		}
+		if name == "message_type" {
+			messageTypeCount++
+			messageType = value
+		} else {
+			alternateMessageType = alternateMessageType || strings.EqualFold(name, "message_type")
+		}
+	}
+	if token, err = decoder.Token(); err != nil || token != json.Delim('}') {
+		return "", false
+	}
+	if decoder.Decode(&struct{}{}) != io.EOF || messageTypeCount != 1 || alternateMessageType {
+		return "", false
+	}
+	value, ok := messageType.(string)
+	return value, ok
 }
 
 func FuzzDecodeRestoreSummary(f *testing.F) {
@@ -156,6 +191,14 @@ func FuzzValidateStructuredExit(f *testing.F) {
 	f.Add([]byte(`{"message_type":"exit_error","code":null}`))
 	f.Add([]byte(`{"message_type":"exit_error","code":"12"}`))
 	f.Add([]byte(`{"message_type":"exit_error","code":12,"code":12}`))
+	f.Add([]byte(`{"message_type":"future","message_type":"exit_error","code":12}`))
+	f.Add([]byte(`{"code":12,"message_type":"exit_error","code":12}`))
+	f.Add([]byte(`{"message_type":"exit_error","Message_Type":"future","code":12}`))
+	f.Add([]byte(`{"message_type":"exit_error","code":12,"Code":12}`))
+	f.Add([]byte(`{"message_type":"exit_error","code":10,"code":12}`))
+	f.Add([]byte(`{"message_type":{"nested":"exit_error"},"code":12}`))
+	f.Add([]byte(`{"message_type":"exit_error","code":[12]}`))
+	f.Add([]byte(`{"message_type":"exit_error","code":12,"future":{"nested":[1,2]}}`))
 
 	f.Fuzz(func(t *testing.T, data []byte) {
 		err := validateStructuredExit(data, 12)
@@ -181,26 +224,59 @@ func independentlyValidStructuredExit(data []byte, expectedCode int64) bool {
 	decoder.UseNumber()
 	exitErrorSeen := false
 	for {
-		var object map[string]any
-		err := decoder.Decode(&object)
+		token, err := decoder.Token()
 		if errors.Is(err, io.EOF) {
 			return exitErrorSeen
 		}
-		if err != nil || object == nil {
+		if err != nil || token != json.Delim('{') {
 			return false
 		}
-		messageType, ok := object["message_type"].(string)
-		if !ok {
+		messageTypeCount := 0
+		codeCount := 0
+		alternateMessageType := false
+		alternateCode := false
+		var messageType any
+		var code any
+		for decoder.More() {
+			token, err := decoder.Token()
+			if err != nil {
+				return false
+			}
+			name, ok := token.(string)
+			if !ok {
+				return false
+			}
+			var value any
+			if err := decoder.Decode(&value); err != nil {
+				return false
+			}
+			switch name {
+			case "message_type":
+				messageTypeCount++
+				messageType = value
+			case "code":
+				codeCount++
+				code = value
+			default:
+				alternateMessageType = alternateMessageType || strings.EqualFold(name, "message_type")
+				alternateCode = alternateCode || strings.EqualFold(name, "code")
+			}
+		}
+		if token, err = decoder.Token(); err != nil || token != json.Delim('}') {
 			return false
 		}
-		if messageType != "exit_error" {
+		messageTypeString, ok := messageType.(string)
+		if messageTypeCount != 1 || alternateMessageType || !ok {
+			return false
+		}
+		if messageTypeString != "exit_error" {
 			continue
 		}
-		code, ok := object["code"].(json.Number)
-		if !ok {
+		codeNumber, ok := code.(json.Number)
+		if codeCount != 1 || alternateCode || !ok {
 			return false
 		}
-		value, err := code.Int64()
+		value, err := codeNumber.Int64()
 		if err != nil || value != expectedCode {
 			return false
 		}
