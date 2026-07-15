@@ -69,11 +69,13 @@ type Config struct {
 
 // Adapter is one configured restic source.
 type Adapter struct {
-	config         Config
-	resolver       source.CredentialResolver
-	verification   sync.RWMutex
-	preflightReady bool
-	preflightEpoch uint64
+	config               Config
+	resolver             source.CredentialResolver
+	verification         sync.RWMutex
+	preflightGate        chan struct{}
+	preflightCalls       uint64
+	preflightBatchFailed bool
+	preflightReady       bool
 }
 
 // New validates static adapter configuration without resolving credentials.
@@ -135,7 +137,7 @@ func New(config Config, resolver source.CredentialResolver) (*Adapter, error) {
 	if config.MaxStdoutBytes > hardMaxStdoutBytes || config.MaxStderrBytes > hardMaxStderrBytes {
 		return nil, &source.Failure{Kind: source.FailureInvalidInput, Operation: "configure", SafeHint: "restic output limits exceed the supported maximum"}
 	}
-	return &Adapter{config: config, resolver: resolver}, nil
+	return &Adapter{config: config, resolver: resolver, preflightGate: make(chan struct{}, 1)}, nil
 }
 
 func validateRepository(repository Repository) error {
@@ -168,9 +170,21 @@ type versionMessage struct {
 
 // Capabilities preflights the executable and its structured-output contract.
 func (adapter *Adapter) Capabilities(ctx context.Context) (source.Capabilities, error) {
-	epoch := adapter.beginPreflight()
+	adapter.beginPreflight()
 	verified := false
-	defer func() { adapter.completePreflight(epoch, verified) }()
+	acquired := false
+	defer func() {
+		adapter.completePreflight(verified)
+		if acquired {
+			<-adapter.preflightGate
+		}
+	}()
+	select {
+	case adapter.preflightGate <- struct{}{}:
+		acquired = true
+	case <-ctx.Done():
+		return source.Capabilities{}, contextFailure("preflight", ctx.Err())
+	}
 	stdout, _, err := adapter.run(ctx, "preflight", []string{"LANG=C", "LC_ALL=C"}, "version", "--json")
 	if err != nil {
 		return source.Capabilities{}, err
@@ -199,19 +213,25 @@ func (adapter *Adapter) Capabilities(ctx context.Context) (source.Capabilities, 
 	}, nil
 }
 
-func (adapter *Adapter) beginPreflight() uint64 {
+func (adapter *Adapter) beginPreflight() {
 	adapter.verification.Lock()
 	defer adapter.verification.Unlock()
-	adapter.preflightEpoch++
+	if adapter.preflightCalls == 0 {
+		adapter.preflightBatchFailed = false
+	}
+	adapter.preflightCalls++
 	adapter.preflightReady = false
-	return adapter.preflightEpoch
 }
 
-func (adapter *Adapter) completePreflight(epoch uint64, ready bool) {
+func (adapter *Adapter) completePreflight(ready bool) {
 	adapter.verification.Lock()
 	defer adapter.verification.Unlock()
-	if adapter.preflightEpoch == epoch {
-		adapter.preflightReady = ready
+	if !ready {
+		adapter.preflightBatchFailed = true
+	}
+	adapter.preflightCalls--
+	if adapter.preflightCalls == 0 {
+		adapter.preflightReady = ready && !adapter.preflightBatchFailed
 	}
 }
 
@@ -679,45 +699,32 @@ func (adapter *Adapter) runRestore(
 			break
 		}
 		if err != nil {
-			cancel()
-			_ = command.Wait()
-			if ctx.Err() != nil {
-				return contextFailure("acquire", ctx.Err())
-			}
-			if limited.N == 0 {
-				return &source.Failure{Kind: source.FailureOutputLimit, Operation: "acquire", SafeHint: "restic output exceeded the configured limit"}
-			}
-			return &source.Failure{Kind: source.FailureCorruptOutput, Operation: "acquire", SafeHint: "restic returned invalid restore JSON"}
+			return finishRestore(
+				ctx,
+				command,
+				cancel,
+				limited,
+				&stderr,
+				&source.Failure{Kind: source.FailureCorruptOutput, Operation: "acquire", SafeHint: "restic returned invalid restore JSON"},
+			)
 		}
 
 		messageType, err := decodeResticMessageType(raw)
 		if err != nil {
-			cancel()
-			_ = command.Wait()
-			if ctx.Err() != nil {
-				return contextFailure("acquire", ctx.Err())
-			}
-			return &source.Failure{Kind: source.FailureCorruptOutput, Operation: "acquire", SafeHint: "restic returned invalid restore JSON"}
+			return finishRestore(ctx, command, cancel, limited, &stderr, &source.Failure{Kind: source.FailureCorruptOutput, Operation: "acquire", SafeHint: "restic returned invalid restore JSON"})
+		}
+		if summarySeen && (messageType == "status" || messageType == "error" || messageType == "summary") {
+			return finishRestore(ctx, command, cancel, limited, &stderr, &source.Failure{Kind: source.FailureCorruptOutput, Operation: "acquire", SafeHint: "restic returned invalid restore completion sequence"})
 		}
 		switch messageType {
 		case "status":
 			var status restoreStatus
 			if err := json.Unmarshal(raw, &status); err != nil {
-				cancel()
-				_ = command.Wait()
-				if ctx.Err() != nil {
-					return contextFailure("acquire", ctx.Err())
-				}
-				return &source.Failure{Kind: source.FailureCorruptOutput, Operation: "acquire", SafeHint: "restic returned invalid restore progress"}
+				return finishRestore(ctx, command, cancel, limited, &stderr, &source.Failure{Kind: source.FailureCorruptOutput, Operation: "acquire", SafeHint: "restic returned invalid restore progress"})
 			}
 			percentDone := float64(status.PercentDone)
 			if percentDone < lastPercent || percentDone < 0 || percentDone > 1 || status.FilesRestored > status.TotalFiles || status.BytesRestored > status.TotalBytes {
-				cancel()
-				_ = command.Wait()
-				if ctx.Err() != nil {
-					return contextFailure("acquire", ctx.Err())
-				}
-				return &source.Failure{Kind: source.FailureCorruptOutput, Operation: "acquire", SafeHint: "restic returned invalid restore progress"}
+				return finishRestore(ctx, command, cancel, limited, &stderr, &source.Failure{Kind: source.FailureCorruptOutput, Operation: "acquire", SafeHint: "restic returned invalid restore progress"})
 			}
 			lastPercent = percentDone
 			if report != nil {
@@ -732,12 +739,7 @@ func (adapter *Adapter) runRestore(
 		case "summary":
 			summary, err := decodeRestoreSummary(raw)
 			if err != nil {
-				cancel()
-				_ = command.Wait()
-				if ctx.Err() != nil {
-					return contextFailure("acquire", ctx.Err())
-				}
-				return &source.Failure{Kind: source.FailureCorruptOutput, Operation: "acquire", SafeHint: "restic returned invalid restore summary"}
+				return finishRestore(ctx, command, cancel, limited, &stderr, &source.Failure{Kind: source.FailureCorruptOutput, Operation: "acquire", SafeHint: "restic returned invalid restore summary"})
 			}
 			summarySeen = true
 			if report != nil && lastPercent < 1 {
@@ -753,27 +755,9 @@ func (adapter *Adapter) runRestore(
 			// Additive message types are explicitly ignored.
 		}
 	}
-	if limited.N == 0 {
-		cancel()
-		_ = command.Wait()
-		if ctx.Err() != nil {
-			return contextFailure("acquire", ctx.Err())
-		}
-		return &source.Failure{Kind: source.FailureOutputLimit, Operation: "acquire", SafeHint: "restic output exceeded the configured limit"}
-	}
-	err = command.Wait()
-	if ctx.Err() != nil {
-		return contextFailure("acquire", ctx.Err())
-	}
-	if stderr.over {
-		return &source.Failure{Kind: source.FailureOutputLimit, Operation: "acquire", SafeHint: "restic output exceeded the configured limit"}
-	}
+	err = finishRestore(ctx, command, cancel, limited, &stderr, nil)
 	if err != nil {
-		var exitError *exec.ExitError
-		if errors.As(err, &exitError) {
-			return failureForExit("acquire", exitError.ExitCode(), stderr.Bytes())
-		}
-		return &source.Failure{Kind: source.FailureUnavailable, Operation: "acquire", ExitCode: -1, SafeHint: "restic could not be started"}
+		return err
 	}
 	if !summarySeen {
 		return &source.Failure{Kind: source.FailureCorruptOutput, Operation: "acquire", SafeHint: "restic restore did not report completion"}
@@ -781,8 +765,35 @@ func (adapter *Adapter) runRestore(
 	return nil
 }
 
-type exitErrorMessage struct {
-	Code int `json:"code"`
+func finishRestore(
+	ctx context.Context,
+	command *exec.Cmd,
+	cancel context.CancelFunc,
+	stdout *io.LimitedReader,
+	stderr *boundedBuffer,
+	parseFailure error,
+) error {
+	if parseFailure != nil || stdout.N == 0 {
+		cancel()
+	}
+	waitErr := command.Wait()
+	if ctx.Err() != nil {
+		return contextFailure("acquire", ctx.Err())
+	}
+	if stdout.N == 0 || stderr.over {
+		return &source.Failure{Kind: source.FailureOutputLimit, Operation: "acquire", SafeHint: "restic output exceeded the configured limit"}
+	}
+	if parseFailure != nil {
+		return parseFailure
+	}
+	if waitErr != nil {
+		var exitError *exec.ExitError
+		if errors.As(waitErr, &exitError) {
+			return failureForExit("acquire", exitError.ExitCode(), stderr.Bytes())
+		}
+		return &source.Failure{Kind: source.FailureUnavailable, Operation: "acquire", ExitCode: -1, SafeHint: "restic could not be started"}
+	}
+	return nil
 }
 
 func validateStructuredExit(stderr []byte, exitCode int) error {
@@ -797,16 +808,19 @@ func validateStructuredExit(stderr []byte, exitCode int) error {
 		if err != nil {
 			return errInvalidStructuredExit
 		}
-		messageType, err := decodeResticMessageType(raw)
+		messageType, code, hasCode, err := decodeStructuredExitObject(raw)
 		if err != nil {
 			return errInvalidStructuredExit
 		}
 		if messageType == "exit_error" {
-			var message exitErrorMessage
-			if err := json.Unmarshal(raw, &message); err != nil {
+			if !hasCode {
 				return errInvalidStructuredExit
 			}
-			if message.Code != exitCode {
+			value, err := code.Int64()
+			if err != nil {
+				return errInvalidStructuredExit
+			}
+			if value != int64(exitCode) {
 				return errInconsistentExitCode
 			}
 			exitMessageSeen = true
@@ -816,6 +830,76 @@ func validateStructuredExit(stderr []byte, exitCode int) error {
 		return errMissingStructuredExit
 	}
 	return nil
+}
+
+func decodeStructuredExitObject(raw json.RawMessage) (string, json.Number, bool, error) {
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	decoder.UseNumber()
+	token, err := decoder.Token()
+	if err != nil || token != json.Delim('{') {
+		return "", "", false, errInvalidStructuredExit
+	}
+	var messageTypeRaw json.RawMessage
+	var codeRaw json.RawMessage
+	messageTypeCount := 0
+	codeCount := 0
+	alternateMessageType := false
+	alternateCode := false
+	for decoder.More() {
+		token, err := decoder.Token()
+		if err != nil {
+			return "", "", false, errInvalidStructuredExit
+		}
+		key, ok := token.(string)
+		if !ok {
+			return "", "", false, errInvalidStructuredExit
+		}
+		var value json.RawMessage
+		if err := decoder.Decode(&value); err != nil {
+			return "", "", false, errInvalidStructuredExit
+		}
+		switch key {
+		case "message_type":
+			messageTypeCount++
+			messageTypeRaw = value
+		case "code":
+			codeCount++
+			codeRaw = value
+		default:
+			alternateMessageType = alternateMessageType || strings.EqualFold(key, "message_type")
+			alternateCode = alternateCode || strings.EqualFold(key, "code")
+		}
+	}
+	if token, err = decoder.Token(); err != nil || token != json.Delim('}') {
+		return "", "", false, errInvalidStructuredExit
+	}
+	if decoder.Decode(&struct{}{}) != io.EOF || messageTypeCount != 1 || alternateMessageType {
+		return "", "", false, errInvalidStructuredExit
+	}
+	var messageType string
+	if bytes.Equal(bytes.TrimSpace(messageTypeRaw), []byte("null")) {
+		return "", "", false, errInvalidStructuredExit
+	}
+	if err := json.Unmarshal(messageTypeRaw, &messageType); err != nil {
+		return "", "", false, errInvalidStructuredExit
+	}
+	if messageType != "exit_error" {
+		return messageType, "", false, nil
+	}
+	if codeCount != 1 || alternateCode {
+		return "", "", false, errInvalidStructuredExit
+	}
+	codeDecoder := json.NewDecoder(bytes.NewReader(codeRaw))
+	codeDecoder.UseNumber()
+	var value any
+	if err := codeDecoder.Decode(&value); err != nil {
+		return "", "", false, errInvalidStructuredExit
+	}
+	code, ok := value.(json.Number)
+	if !ok || codeDecoder.Decode(&struct{}{}) != io.EOF {
+		return "", "", false, errInvalidStructuredExit
+	}
+	return messageType, code, true, nil
 }
 
 func failureForExit(operation string, exitCode int, stderr []byte) error {

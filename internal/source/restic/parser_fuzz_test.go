@@ -79,6 +79,10 @@ func FuzzValidateStructuredExit(f *testing.F) {
 	f.Add([]byte("{\"message_type\":\"future_error\",\"private\":\"" + fuzzPrivateMarker + "\"}\n{\"message_type\":\"exit_error\",\"code\":12}"))
 	f.Add([]byte(`{"message_type":null,"private":"` + fuzzPrivateMarker + `"}`))
 	f.Add([]byte(`{"message_type":"exit_error","code":10,"private":"` + fuzzPrivateMarker + `"}`))
+	f.Add([]byte(`{"message_type":"exit_error","Code":12}`))
+	f.Add([]byte(`{"message_type":"exit_error","code":null}`))
+	f.Add([]byte(`{"message_type":"exit_error","code":"12"}`))
+	f.Add([]byte(`{"message_type":"exit_error","code":12,"code":12}`))
 
 	f.Fuzz(func(t *testing.T, data []byte) {
 		err := validateStructuredExit(data, 12)

@@ -9,6 +9,7 @@ import (
 	"reflect"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -21,6 +22,18 @@ type credentialResolver func(context.Context, drill.CredentialReference) ([]byte
 
 func (resolve credentialResolver) Resolve(ctx context.Context, reference drill.CredentialReference) ([]byte, error) {
 	return resolve(ctx, reference)
+}
+
+type observedDoneContext struct {
+	context.Context
+	observed chan struct{}
+	done     chan struct{}
+	once     sync.Once
+}
+
+func (ctx *observedDoneContext) Done() <-chan struct{} {
+	ctx.once.Do(func() { close(ctx.observed) })
+	return ctx.done
 }
 
 func TestListMapsStructuredExitErrorsWithoutLeakingOutput(t *testing.T) {
@@ -139,6 +152,46 @@ exit 12
 			var failure *source.Failure
 			if !errors.As(err, &failure) || failure.Kind != source.FailureCorruptOutput {
 				t.Fatalf("failure = %+v, want corrupt output", failure)
+			}
+			assertDirectoryEmpty(t, credentialTempDir)
+		})
+	}
+}
+
+func TestListRejectsInvalidStructuredExitFields(t *testing.T) {
+	tests := []struct {
+		name     string
+		message  string
+		safeHint string
+	}{
+		{name: "alternate message type case", message: `{"Message_Type":"exit_error","code":12}`, safeHint: "restic returned invalid error JSON"},
+		{name: "alternate code case", message: `{"message_type":"exit_error","Code":12}`, safeHint: "restic returned invalid error JSON"},
+		{name: "null code", message: `{"message_type":"exit_error","code":null}`, safeHint: "restic returned invalid error JSON"},
+		{name: "string code", message: `{"message_type":"exit_error","code":"12"}`, safeHint: "restic returned invalid error JSON"},
+		{name: "missing code", message: `{"message_type":"exit_error"}`, safeHint: "restic returned invalid error JSON"},
+		{name: "duplicate code", message: `{"message_type":"exit_error","code":12,"code":12}`, safeHint: "restic returned invalid error JSON"},
+		{name: "conflicting code", message: `{"message_type":"exit_error","code":10,"code":12}`, safeHint: "restic returned invalid error JSON"},
+		{name: "duplicate message type", message: `{"message_type":"exit_error","message_type":"exit_error","code":12}`, safeHint: "restic returned invalid error JSON"},
+		{name: "mismatched code", message: `{"message_type":"exit_error","code":10}`, safeHint: "restic returned inconsistent error JSON"},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			credentialTempDir := t.TempDir()
+			adapter := newTestAdapter(t, resticadapter.Config{
+				Binary: writeFakeResticScript(t, `
+printf '%s\n' '`+test.message+`' >&2
+exit 12
+`),
+				Repository:        resticadapter.Repository{Kind: resticadapter.RepositoryLocal, Location: t.TempDir()},
+				Password:          drill.CredentialReference{Provider: drill.CredentialEnvironment, Locator: "REHEARSE_TEST_RESTIC_PASSWORD"},
+				CredentialTempDir: credentialTempDir,
+			})
+
+			_, err := adapter.ListRecoveryPoints(context.Background())
+			var failure *source.Failure
+			if !errors.As(err, &failure) || failure.Kind != source.FailureCorruptOutput || failure.SafeHint != test.safeHint {
+				t.Fatalf("failure = %+v, want corrupt output with hint %q", failure, test.safeHint)
 			}
 			assertDirectoryEmpty(t, credentialTempDir)
 		})
@@ -423,6 +476,62 @@ printf '%s\n' '`+test.summary+`'
 	}
 }
 
+func TestAcquireRejectsKnownMessagesAfterSummary(t *testing.T) {
+	const recoveryPointID = "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"
+	tests := []struct {
+		name   string
+		output string
+	}{
+		{
+			name: "duplicate summary",
+			output: `printf '%s\n' '{"message_type":"summary"}'
+printf '%s\n' '{"message_type":"summary"}'`,
+		},
+		{
+			name: "status after summary",
+			output: `printf '%s\n' '{"message_type":"summary"}'
+printf '%s\n' '{"message_type":"status"}'`,
+		},
+		{
+			name: "error after summary",
+			output: `printf '%s\n' '{"message_type":"summary"}'
+printf '%s\n' '{"message_type":"error"}'`,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			workspace := t.TempDir()
+			credentialTempDir := t.TempDir()
+			adapter := newTestAdapter(t, resticadapter.Config{
+				Binary: writeFakeResticScript(t, `
+target=""
+while test "$#" -gt 0; do
+  if test "$1" = "--target"; then target="$2"; shift; fi
+  shift
+done
+printf 'partial-private-content' > "$target/item"
+`+test.output+`
+`),
+				Repository:        resticadapter.Repository{Kind: resticadapter.RepositoryLocal, Location: t.TempDir()},
+				Password:          drill.CredentialReference{Provider: drill.CredentialEnvironment, Locator: "REHEARSE_TEST_RESTIC_PASSWORD"},
+				CredentialTempDir: credentialTempDir,
+			})
+
+			_, err := adapter.Acquire(context.Background(), source.AcquireRequest{
+				RecoveryPointID: recoveryPointID,
+				Workspace:       workspace,
+			})
+			var failure *source.Failure
+			if !errors.As(err, &failure) || failure.Kind != source.FailureCorruptOutput || failure.SafeHint != "restic returned invalid restore completion sequence" {
+				t.Fatalf("failure = %+v, want invalid completion sequence", failure)
+			}
+			assertDirectoryEmpty(t, workspace)
+			assertDirectoryEmpty(t, credentialTempDir)
+		})
+	}
+}
+
 func TestAcquireRejectsInvalidStatusBeforePromotion(t *testing.T) {
 	t.Parallel()
 
@@ -542,8 +651,8 @@ func TestAcquirePromotesEmptyRestoreWithOmittedZeroCounters(t *testing.T) {
 	credentialTempDir := t.TempDir()
 	adapter := newTestAdapter(t, resticadapter.Config{
 		Binary: writeFakeResticScript(t, `
-printf '%s\n' '{"message_type":"status"}'
 printf '%s\n' '{"message_type":"summary"}'
+printf '%s\n' '{"message_type":"future_after_summary","future_field":true}'
 `),
 		Repository:        resticadapter.Repository{Kind: resticadapter.RepositoryLocal, Location: t.TempDir()},
 		Password:          drill.CredentialReference{Provider: drill.CredentialEnvironment, Locator: "REHEARSE_TEST_RESTIC_PASSWORD"},
@@ -1061,6 +1170,51 @@ while :; do printf '%064d' 0 >&2 || :; done`},
 	}
 }
 
+func TestAcquirePrefersStderrLimitOverTruncatedStdoutAndCleansUp(t *testing.T) {
+	const recoveryPointID = "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"
+	workspace := t.TempDir()
+	credentialTempDir := t.TempDir()
+	adapter := newTestAdapter(t, resticadapter.Config{
+		Binary: writeFakeResticScript(t, `
+target=""
+while test "$#" -gt 0; do
+  if test "$1" = "--target"; then target="$2"; shift; fi
+  shift
+done
+printf 'partial-private-content' > "$target/item"
+printf '%s' '{"message_type":"status"'
+trap '' PIPE
+printf '%0256d' 0 >&2 || :
+exec sleep 30
+`),
+		Repository:        resticadapter.Repository{Kind: resticadapter.RepositoryLocal, Location: t.TempDir()},
+		Password:          drill.CredentialReference{Provider: drill.CredentialEnvironment, Locator: "REHEARSE_TEST_RESTIC_PASSWORD"},
+		CredentialTempDir: credentialTempDir,
+		MaxStdoutBytes:    1024,
+		MaxStderrBytes:    128,
+	})
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	started := time.Now()
+	_, err := adapter.Acquire(ctx, source.AcquireRequest{
+		RecoveryPointID: recoveryPointID,
+		Workspace:       workspace,
+	})
+	if elapsed := time.Since(started); elapsed >= time.Second {
+		t.Fatalf("stderr overflow termination took %s, want under 1s", elapsed)
+	}
+	var failure *source.Failure
+	if !errors.As(err, &failure) || failure.Kind != source.FailureOutputLimit {
+		t.Fatalf("failure = %+v, want output limit", failure)
+	}
+	if ctx.Err() != nil {
+		t.Fatalf("stderr overflow reached caller deadline: %v", ctx.Err())
+	}
+	assertDirectoryEmpty(t, workspace)
+	assertDirectoryEmpty(t, credentialTempDir)
+}
+
 func TestAcquireBoundsStdoutAndStderrIndependentlyAndRemovesStaging(t *testing.T) {
 	t.Parallel()
 
@@ -1545,6 +1699,135 @@ printf '%s\n' '[]'
 	}
 }
 
+func TestOverlappingPreflightFailureKeepsSuccessfulWaiterUnverified(t *testing.T) {
+	started := filepath.Join(t.TempDir(), "preflight-started")
+	release := filepath.Join(t.TempDir(), "preflight-release")
+	binary := writeFakeResticScript(t, `
+if test "$1" = "version"; then
+  if ! test -e '`+started+`'; then
+    : > '`+started+`'
+    while ! test -e '`+release+`'; do sleep 0.01; done
+    exit 91
+  fi
+  printf '%s\n' '{"message_type":"version","version":"0.19.1"}'
+  exit 0
+fi
+printf '%s\n' '[]'
+`)
+	adapter, err := resticadapter.New(resticadapter.Config{
+		Binary:            binary,
+		Repository:        resticadapter.Repository{Kind: resticadapter.RepositoryLocal, Location: t.TempDir()},
+		Password:          drill.CredentialReference{Provider: drill.CredentialEnvironment, Locator: "REHEARSE_TEST_RESTIC_PASSWORD"},
+		CredentialTempDir: t.TempDir(),
+	}, credentialResolver(func(context.Context, drill.CredentialReference) ([]byte, error) {
+		return []byte("fixture-password"), nil
+	}))
+	if err != nil {
+		t.Fatalf("new adapter: %v", err)
+	}
+
+	olderDone := make(chan error, 1)
+	go func() {
+		_, err := adapter.Capabilities(context.Background())
+		olderDone <- err
+	}()
+	waitForPath(t, started)
+	newerContext := &observedDoneContext{
+		Context:  context.Background(),
+		observed: make(chan struct{}),
+		done:     make(chan struct{}),
+	}
+	newerDone := make(chan error, 1)
+	go func() {
+		_, err := adapter.Capabilities(newerContext)
+		newerDone <- err
+	}()
+	<-newerContext.observed
+	select {
+	case err := <-newerDone:
+		t.Fatalf("newer preflight completed before older release: %v", err)
+	default:
+	}
+	if err := os.WriteFile(release, []byte("release"), 0o600); err != nil {
+		t.Fatalf("release older preflight: %v", err)
+	}
+	if err := <-olderDone; err == nil {
+		t.Fatal("older preflight succeeded")
+	}
+	if err := <-newerDone; err != nil {
+		t.Fatalf("newer preflight: %v", err)
+	}
+	_, err = adapter.ListRecoveryPoints(context.Background())
+	assertPreflightRequired(t, err, "list")
+	if _, err := adapter.Capabilities(context.Background()); err != nil {
+		t.Fatalf("recovery preflight: %v", err)
+	}
+	if _, err := adapter.ListRecoveryPoints(context.Background()); err != nil {
+		t.Fatalf("list after recovery preflight: %v", err)
+	}
+}
+
+func TestCancelledWaitingPreflightInvalidatesOverlappingSuccess(t *testing.T) {
+	started := filepath.Join(t.TempDir(), "preflight-started")
+	release := filepath.Join(t.TempDir(), "preflight-release")
+	binary := writeFakeResticScript(t, `
+if test "$1" = "version"; then
+  if ! test -e '`+release+`'; then
+    : > '`+started+`'
+    while ! test -e '`+release+`'; do sleep 0.01; done
+  fi
+  printf '%s\n' '{"message_type":"version","version":"0.19.1"}'
+  exit 0
+fi
+printf '%s\n' '[]'
+`)
+	adapter, err := resticadapter.New(resticadapter.Config{
+		Binary:            binary,
+		Repository:        resticadapter.Repository{Kind: resticadapter.RepositoryLocal, Location: t.TempDir()},
+		Password:          drill.CredentialReference{Provider: drill.CredentialEnvironment, Locator: "REHEARSE_TEST_RESTIC_PASSWORD"},
+		CredentialTempDir: t.TempDir(),
+	}, credentialResolver(func(context.Context, drill.CredentialReference) ([]byte, error) {
+		return []byte("fixture-password"), nil
+	}))
+	if err != nil {
+		t.Fatalf("new adapter: %v", err)
+	}
+
+	activeDone := make(chan error, 1)
+	go func() {
+		_, err := adapter.Capabilities(context.Background())
+		activeDone <- err
+	}()
+	waitForPath(t, started)
+	waitingCtx, cancelWaiting := context.WithCancel(context.Background())
+	cancelWaiting()
+	startedWaiting := time.Now()
+	_, err = adapter.Capabilities(waitingCtx)
+	if elapsed := time.Since(startedWaiting); elapsed >= time.Second {
+		t.Fatalf("cancelled waiting preflight took %s, want under 1s", elapsed)
+	}
+	var failure *source.Failure
+	if !errors.As(err, &failure) || failure.Kind != source.FailureCancelled {
+		t.Fatalf("waiting failure = %+v, want cancelled", failure)
+	}
+	_, err = adapter.ListRecoveryPoints(context.Background())
+	assertPreflightRequired(t, err, "list")
+	if err := os.WriteFile(release, []byte("release"), 0o600); err != nil {
+		t.Fatalf("release active preflight: %v", err)
+	}
+	if err := <-activeDone; err != nil {
+		t.Fatalf("active preflight: %v", err)
+	}
+	_, err = adapter.ListRecoveryPoints(context.Background())
+	assertPreflightRequired(t, err, "list")
+	if _, err := adapter.Capabilities(context.Background()); err != nil {
+		t.Fatalf("recovery preflight: %v", err)
+	}
+	if _, err := adapter.ListRecoveryPoints(context.Background()); err != nil {
+		t.Fatalf("list after recovery preflight: %v", err)
+	}
+}
+
 func TestCapabilitiesDoesNotInheritParentEnvironment(t *testing.T) {
 	const sentinel = "must-not-reach-restic-version"
 	t.Setenv("REHEARSE_PREFLIGHT_SENTINEL", sentinel)
@@ -1645,6 +1928,23 @@ func assertDirectoryEmpty(t *testing.T, directory string) {
 	}
 	if len(entries) != 0 {
 		t.Fatalf("directory %s is not empty: %v", directory, entries)
+	}
+}
+
+func waitForPath(t *testing.T, path string) {
+	t.Helper()
+
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		if _, err := os.Stat(path); err == nil {
+			return
+		} else if !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("stat %s: %v", path, err)
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("timed out waiting for %s", path)
+		}
+		time.Sleep(time.Millisecond)
 	}
 }
 
