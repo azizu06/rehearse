@@ -54,8 +54,9 @@ rewrites and revalidates the snapshot before `up` receives only those bytes.
 The runner also checks every exact generated container, network, and volume
 name without ownership filters and refuses to adopt any existing object. While
 holding the project lock, it then atomically creates every generated network and
-named volume with the exact managed, project, run ID, and full-fingerprint
-labels and immediately verifies those labels. The final revalidated snapshot
+named volume with the exact managed, project, run ID, full-fingerprint, and
+invocation-specific sandbox-claim labels and immediately verifies their names,
+daemon identities, and labels. The final revalidated snapshot
 references only those exact pre-created resources as external name-only
 references, so Compose cannot adopt a late unrelated name collision. Containers
 do not start unless every reservation verifies.
@@ -64,9 +65,20 @@ live in a deterministic Rehearse-owned 0700 directory as 0600 files, are never
 included in command errors, and are removed by both normal cleanup and startup
 reconciliation after a process crash.
 
-Cleanup lists, inspects, and deletes only resources matching the Rehearse
-managed, project, run ID, and full run-fingerprint labels. It uses a fresh bounded
-context after success, failure, cancellation, timeout, or output overflow.
+Before any Docker creation, the runner durably records a cryptographically random
+sandbox claim ID; the identifier is not secret. Stable run labels remain
+attribution metadata and are never
+sufficient deletion authority. Live cleanup keeps an invocation-local ledger
+containing only successfully created and immediately verified resource type,
+name, daemon identity, and full labels. It deletes only ledgered resources whose
+current daemon identity and full labels still match. Startup cleanup selects only
+resources matching the durable active claim ID and every stable run label.
+Existing or late-colliding resources are never adopted or deleted, even when
+they reproduce every stable label. A Docker-daemon administrator remains inside
+the trusted local boundary and can subvert Docker resource metadata.
+
+Cleanup uses a fresh bounded context after success, failure, cancellation,
+timeout, or output overflow.
 Container removal never cascades into attached volumes; every volume deletion
 comes from the exact ownership-filtered volume list.
 After an initial 500 ms daemon-settle interval, cleanup requires two empty
@@ -77,7 +89,8 @@ The startup janitor consumes Issue #6's durable queue:
 `needs_reconciliation = 1`, cleanup status `pending` or `failed`, or a failed
 sandbox cleanup claim.
 Before any Docker command can create resources, the runner adds a one-shot
-cleanup claim for an eligible non-reconciling durable run. A live pending claim
+cleanup claim with its sandbox claim ID for an eligible non-reconciling durable
+run. A live pending claim
 stays out of the janitor queue; restart reconciliation activates it after
 process death, while a failed claim enters the queue immediately. Successful
 cleanup closes the claim without permitting a second sandbox lifecycle for

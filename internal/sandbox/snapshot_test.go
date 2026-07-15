@@ -24,6 +24,7 @@ func TestRunnerExecutesTheExactValidatedSnapshotAfterInputsMutate(t *testing.T) 
 		cleaner: cleaner{command: command, waiter: &recordingWaiter{}, quiescence: cleanupQuiescence, snapshotRoot: root},
 		journal: &recordingCleanupJournal{},
 		locker:  newProjectLocker(filepath.Join(root, "locks")), temporaryRoot: root, cleanupTimeout: time.Second,
+		newClaimID: func() (string, error) { return testClaimID, nil },
 	}
 	request := Request{
 		RunID: "run-immutable-snapshot", ComposeFiles: []string{source}, ProjectDirectory: root,
@@ -47,7 +48,7 @@ type mutationDocker struct {
 	configCalls int
 	rendered    []byte
 	upObserved  bool
-	labels      map[string]map[string]string
+	resources   map[string]inspectedResource
 }
 
 func (docker *mutationDocker) run(_ context.Context, _ int64, args ...string) ([]byte, error) {
@@ -78,8 +79,8 @@ func (docker *mutationDocker) run(_ context.Context, _ int64, args ...string) ([
 		return []byte(`{"id":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","os":"linux","architecture":"amd64","variant":"","volumes":null}`), nil
 	}
 	if len(args) >= 2 && (args[0] == "network" || args[0] == "volume") && args[1] == "create" {
-		if docker.labels == nil {
-			docker.labels = make(map[string]map[string]string)
+		if docker.resources == nil {
+			docker.resources = make(map[string]inspectedResource)
 		}
 		labels := make(map[string]string)
 		for index := 0; index+1 < len(args); index++ {
@@ -90,11 +91,17 @@ func (docker *mutationDocker) run(_ context.Context, _ int64, args ...string) ([
 				}
 			}
 		}
-		docker.labels[args[0]] = labels
-		return []byte(args[len(args)-1] + "\n"), nil
+		name := args[len(args)-1]
+		docker.resources[args[0]+"\x00"+name] = inspectedResource{DaemonID: args[0] + "-id", Name: name, Labels: labels}
+		return []byte(name + "\n"), nil
 	}
 	if len(args) >= 2 && (args[0] == "network" || args[0] == "volume") && args[1] == "inspect" {
-		return json.Marshal(docker.labels[args[0]])
+		for key, resource := range docker.resources {
+			if strings.HasPrefix(key, args[0]+"\x00") && (resource.Name == args[len(args)-1] || resource.DaemonID == args[len(args)-1]) {
+				return json.Marshal(resource)
+			}
+		}
+		return nil, os.ErrNotExist
 	}
 	if containsSequence(args, "up", "--detach") {
 		docker.upObserved = true
@@ -129,6 +136,10 @@ func (docker *mutationDocker) run(_ context.Context, _ int64, args ...string) ([
 		if err != nil {
 			docker.t.Fatalf("build expected identity: %v", err)
 		}
+		identity, err = identity.withClaimID(testClaimID)
+		if err != nil {
+			docker.t.Fatalf("build expected claimed identity: %v", err)
+		}
 		want, err = rewriteSnapshotReservedResources(want, identity, model)
 		if err != nil {
 			docker.t.Fatalf("build expected reserved snapshot: %v", err)
@@ -138,7 +149,45 @@ func (docker *mutationDocker) run(_ context.Context, _ int64, args ...string) ([
 		}
 		assertProtectedMode(docker.t, filepath.Dir(snapshotPath), 0o700)
 		assertProtectedMode(docker.t, snapshotPath, 0o600)
+		projectName := argumentAfter(args, "--project-name")
+		var executed composeModel
+		if err := json.Unmarshal(actual, &executed); err != nil {
+			docker.t.Fatalf("decode executed snapshot: %v", err)
+		}
+		docker.resources["container\x00"+projectName+"-worker-1"] = inspectedResource{
+			DaemonID: "container-id", Name: projectName + "-worker-1", Labels: executed.Services["worker"].Labels,
+		}
 		return nil, nil
+	}
+	if len(args) >= 2 && args[1] == "ls" {
+		joined := strings.Join(args, " ")
+		for key, resource := range docker.resources {
+			if !strings.HasPrefix(key, args[0]+"\x00") {
+				continue
+			}
+			if strings.Contains(joined, "name=^") && (strings.Contains(joined, "name=^"+resource.Name+"$") || strings.Contains(joined, "name=^/"+resource.Name+"$")) {
+				return []byte(resource.DaemonID + "\n"), nil
+			}
+			if strings.Contains(joined, "label="+sandboxClaimLabel+"="+testClaimID) {
+				return []byte(resource.DaemonID + "\n"), nil
+			}
+		}
+		return nil, nil
+	}
+	if len(args) >= 2 && args[1] == "inspect" {
+		for key, resource := range docker.resources {
+			if strings.HasPrefix(key, args[0]+"\x00") && (resource.Name == args[len(args)-1] || resource.DaemonID == args[len(args)-1]) {
+				return json.Marshal(resource)
+			}
+		}
+		return nil, os.ErrNotExist
+	}
+	if len(args) >= 4 && args[1] == "rm" {
+		for key, resource := range docker.resources {
+			if strings.HasPrefix(key, args[0]+"\x00") && (resource.Name == args[len(args)-1] || resource.DaemonID == args[len(args)-1]) {
+				delete(docker.resources, key)
+			}
+		}
 	}
 	return nil, nil
 }

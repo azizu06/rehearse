@@ -128,6 +128,7 @@ func TestCleanerWaitsForAndRemovesDelayedResources(t *testing.T) {
 
 	runID := "integration-delayed-cleanup"
 	runFingerprint := fingerprint(runID)
+	claimID := strings.Repeat("c", 64)
 	projectName := "rehearse-" + runFingerprint[:24]
 	volumeName := "rehearse-delayed-" + runFingerprint[:12]
 	_ = exec.Command("docker", "volume", "rm", "--force", volumeName).Run()
@@ -140,6 +141,7 @@ func TestCleanerWaitsForAndRemovesDelayedResources(t *testing.T) {
 			"--label", "dev.rehearse.run-fingerprint="+runFingerprint,
 			"--label", "dev.rehearse.project="+projectName,
 			"--label", "dev.rehearse.run-id="+runID,
+			"--label", "dev.rehearse.sandbox-claim="+claimID,
 			volumeName,
 		)
 		_ = command.Run()
@@ -150,7 +152,7 @@ func TestCleanerWaitsForAndRemovesDelayedResources(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	started := time.Now()
-	if err := cleaner.Cleanup(ctx, runID); err != nil {
+	if err := cleaner.Cleanup(ctx, runID, claimID); err != nil {
 		t.Fatalf("Cleanup: %v", err)
 	}
 	<-created
@@ -172,7 +174,7 @@ func TestCleanerDoesNotDeleteUnrelatedDockerResources(t *testing.T) {
 	cleaner := sandbox.NewCleaner(sandbox.CleanerOptions{Binary: "docker"})
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
-	if err := cleaner.Cleanup(ctx, "integration-unrelated-scope"); err != nil {
+	if err := cleaner.Cleanup(ctx, "integration-unrelated-scope", strings.Repeat("d", 64)); err != nil {
 		t.Fatalf("Cleanup: %v", err)
 	}
 	if got := dockerOutput(t, "volume", "ls", "--quiet", "--filter", "name="+name); got == "" {
@@ -210,6 +212,92 @@ func TestDockerRunnerRejectsAndPreservesUnlabeledExactVolumeCollision(t *testing
 	labels := dockerOutput(t, "volume", "inspect", "--format", `{{json .Labels}}`, volumeName)
 	if strings.Contains(labels, "dev.rehearse") {
 		t.Fatalf("runner adopted the unrelated volume: %s", labels)
+	}
+}
+
+func TestDockerRunnerPreservesExactStableLabelVolumeCollision(t *testing.T) {
+	requireDockerIntegration(t)
+
+	runID := "integration-stable-label-collision"
+	runFingerprint := fingerprint(runID)
+	projectName := "rehearse-" + runFingerprint[:24]
+	volumeName := projectName + "_work"
+	_ = exec.Command("docker", "volume", "rm", "--force", volumeName).Run()
+	dockerOutput(t, "volume", "create",
+		"--label", "dev.rehearse.managed=true",
+		"--label", "dev.rehearse.run-fingerprint="+runFingerprint,
+		"--label", "dev.rehearse.project="+projectName,
+		"--label", "dev.rehearse.run-id="+runID,
+		volumeName,
+	)
+	t.Cleanup(func() { _ = exec.Command("docker", "volume", "rm", "--force", volumeName).Run() })
+
+	runner := sandbox.NewDockerRunner(sandbox.DockerRunnerOptions{
+		Binary: "docker", CleanupJournal: newCleanupJournal(t, runID), TemporaryRoot: t.TempDir(), LockRoot: t.TempDir(), CleanupTimeout: 5 * time.Second,
+	})
+	request := sandbox.Request{
+		RunID: runID, ComposeFiles: []string{filepath.Join("testdata", "compose.yaml")},
+		Limits: sandbox.Limits{CPUs: "0.25", MemoryBytes: 32 << 20, PIDs: 16, Duration: 10 * time.Second, OutputBytes: 1 << 20},
+	}
+	_, err := runner.Run(context.Background(), request, func(context.Context, sandbox.Instance) error {
+		t.Fatal("callback ran after an exact stable-label collision")
+		return nil
+	})
+	if !errors.Is(err, sandbox.ErrProjectExists) {
+		t.Fatalf("Run error = %v, want ErrProjectExists", err)
+	}
+	if got := dockerOutput(t, "volume", "ls", "--quiet", "--filter", "name=^"+volumeName+"$"); got == "" {
+		t.Fatal("runner deleted the pre-existing stable-label volume")
+	}
+}
+
+func TestStartupCleanerUsesOnlyTheActiveSandboxClaim(t *testing.T) {
+	requireDockerIntegration(t)
+
+	runID := "integration-claim-scope"
+	runFingerprint := fingerprint(runID)
+	projectName := "rehearse-" + runFingerprint[:24]
+	activeClaim := strings.Repeat("f", 64)
+	staleClaim := strings.Repeat("a", 64)
+	names := map[string]string{
+		"active": projectName + "_active",
+		"stable": projectName + "_stable",
+		"stale":  projectName + "_stale",
+	}
+	for _, name := range names {
+		_ = exec.Command("docker", "volume", "rm", "--force", name).Run()
+		name := name
+		t.Cleanup(func() { _ = exec.Command("docker", "volume", "rm", "--force", name).Run() })
+	}
+	create := func(name, claimID string) {
+		args := []string{"volume", "create",
+			"--label", "dev.rehearse.managed=true",
+			"--label", "dev.rehearse.run-fingerprint=" + runFingerprint,
+			"--label", "dev.rehearse.project=" + projectName,
+			"--label", "dev.rehearse.run-id=" + runID,
+		}
+		if claimID != "" {
+			args = append(args, "--label", "dev.rehearse.sandbox-claim="+claimID)
+		}
+		dockerOutput(t, append(args, name)...)
+	}
+	create(names["active"], activeClaim)
+	create(names["stable"], "")
+	create(names["stale"], staleClaim)
+
+	cleaner := sandbox.NewCleaner(sandbox.CleanerOptions{Binary: "docker", LockRoot: t.TempDir()})
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := cleaner.Cleanup(ctx, runID, activeClaim); err != nil {
+		t.Fatalf("Cleanup: %v", err)
+	}
+	if got := dockerOutput(t, "volume", "ls", "--quiet", "--filter", "name=^"+names["active"]+"$"); got != "" {
+		t.Fatalf("active-claim volume survived cleanup: %s", got)
+	}
+	for _, key := range []string{"stable", "stale"} {
+		if got := dockerOutput(t, "volume", "ls", "--quiet", "--filter", "name=^"+names[key]+"$"); got == "" {
+			t.Fatalf("%s volume was deleted", key)
+		}
 	}
 }
 
@@ -381,6 +469,12 @@ func TestStartupJanitorRecoversAfterForcedProcessKill(t *testing.T) {
 		killAndWait()
 		t.Fatal("forced-kill helper reported ready without a labeled container")
 	}
+	claimLabel := dockerOutput(t, "container", "inspect", "--format", `{{ index .Config.Labels "dev.rehearse.sandbox-claim" }}`,
+		dockerOutput(t, "container", "ls", "--all", "--quiet", "--filter", "label=dev.rehearse.run-fingerprint="+fingerprint(runID)))
+	if len(claimLabel) != 64 {
+		killAndWait()
+		t.Fatalf("forced-kill resource claim label = %q", claimLabel)
+	}
 	killAndWait()
 	crashSnapshot := filepath.Join(directory, "rehearse-compose-"+fingerprint(runID))
 	if info, err := os.Stat(filepath.Join(crashSnapshot, "compose.json")); err != nil || info.Mode().Perm() != 0o600 {
@@ -392,6 +486,10 @@ func TestStartupJanitorRecoversAfterForcedProcessKill(t *testing.T) {
 		t.Fatalf("reopen forced-kill journal: %v", err)
 	}
 	t.Cleanup(func() { _ = store.Close() })
+	durableClaim, active, err := store.SandboxCleanupClaim(context.Background(), runID)
+	if err != nil || !active || durableClaim != claimLabel {
+		t.Fatalf("durable forced-kill claim = %q active=%t error=%v, want %q", durableClaim, active, err, claimLabel)
+	}
 	cleaner := sandbox.NewCleaner(sandbox.CleanerOptions{Binary: "docker", LockRoot: lockRoot, TemporaryRoot: directory})
 	janitor := sandbox.NewJanitor(store, cleaner, sandbox.JanitorOptions{CleanupTimeout: 10 * time.Second})
 	if err := janitor.Reconcile(context.Background()); err != nil {

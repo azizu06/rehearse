@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -31,6 +32,9 @@ func TestJanitorRetriesFailedCleanupUntilItSucceeds(t *testing.T) {
 	}
 	if _, err := store.CreateRun(ctx, "run-janitor", plan.ID, plan.Version, startedAt); err != nil {
 		t.Fatalf("CreateRun: %v", err)
+	}
+	if err := store.ClaimSandboxCleanup(ctx, "run-janitor", strings.Repeat("e", 64), startedAt.Add(time.Second)); err != nil {
+		t.Fatalf("ClaimSandboxCleanup: %v", err)
 	}
 	if err := store.Close(); err != nil {
 		t.Fatalf("Close: %v", err)
@@ -93,7 +97,7 @@ type sequencedCleaner struct {
 	errors []error
 }
 
-func (cleaner *sequencedCleaner) Cleanup(context.Context, string) error {
+func (cleaner *sequencedCleaner) Cleanup(context.Context, string, string) error {
 	if len(cleaner.errors) == 0 {
 		return nil
 	}

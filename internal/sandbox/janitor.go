@@ -12,6 +12,7 @@ import (
 // ReconciliationStore is the Issue #6 durable queue consumed at startup.
 type ReconciliationStore interface {
 	RunsNeedingReconciliation(context.Context) ([]drill.Run, error)
+	SandboxCleanupClaim(context.Context, string) (string, bool, error)
 	RecordOutcome(context.Context, string, drill.Outcome, time.Time) (drill.Run, error)
 	BeginCleanupRetry(context.Context, string, time.Time) (drill.Run, error)
 	RecordCleanup(context.Context, string, drill.CleanupStatus, time.Time) (drill.Run, error)
@@ -19,7 +20,7 @@ type ReconciliationStore interface {
 
 // RunCleaner is implemented by the label-scoped Docker cleaner.
 type RunCleaner interface {
-	Cleanup(context.Context, string) error
+	Cleanup(context.Context, string, string) error
 }
 
 // JanitorOptions configure bounded startup reconciliation.
@@ -79,9 +80,15 @@ func (janitor *Janitor) Reconcile(ctx context.Context) error {
 			continue
 		}
 
-		cleanupContext, cancel := context.WithTimeout(context.WithoutCancel(ctx), janitor.cleanupTimeout)
-		cleanupErr := janitor.cleaner.Cleanup(cleanupContext, run.ID)
-		cancel()
+		claimID, hasClaim, claimErr := janitor.store.SandboxCleanupClaim(ctx, run.ID)
+		var cleanupErr error
+		if claimErr != nil {
+			cleanupErr = claimErr
+		} else if hasClaim {
+			cleanupContext, cancel := context.WithTimeout(context.WithoutCancel(ctx), janitor.cleanupTimeout)
+			cleanupErr = janitor.cleaner.Cleanup(cleanupContext, run.ID, claimID)
+			cancel()
+		}
 		status := drill.CleanupSucceeded
 		if cleanupErr != nil {
 			status = drill.CleanupFailed

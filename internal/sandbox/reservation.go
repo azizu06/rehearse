@@ -9,7 +9,51 @@ import (
 	"strings"
 )
 
-func reserveComposeResources(ctx context.Context, command dockerCommand, identity identity, model composeModel) error {
+type createdResource struct {
+	kind     string
+	name     string
+	daemonID string
+}
+
+type createdResourceLedger struct {
+	resources map[string]createdResource
+}
+
+func newCreatedResourceLedger() *createdResourceLedger {
+	return &createdResourceLedger{resources: make(map[string]createdResource)}
+}
+
+func (ledger *createdResourceLedger) add(resource createdResource) {
+	ledger.resources[resource.kind+"\x00"+resource.name] = resource
+}
+
+func (ledger *createdResourceLedger) get(kind, name string) (createdResource, bool) {
+	resource, exists := ledger.resources[kind+"\x00"+name]
+	return resource, exists
+}
+
+func (ledger *createdResourceLedger) ordered() []createdResource {
+	resources := make([]createdResource, 0, len(ledger.resources))
+	for _, resource := range ledger.resources {
+		resources = append(resources, resource)
+	}
+	order := map[string]int{"container": 0, "network": 1, "volume": 2}
+	sort.Slice(resources, func(left, right int) bool {
+		if order[resources[left].kind] != order[resources[right].kind] {
+			return order[resources[left].kind] < order[resources[right].kind]
+		}
+		return resources[left].name < resources[right].name
+	})
+	return resources
+}
+
+type inspectedResource struct {
+	DaemonID string            `json:"id"`
+	Name     string            `json:"name"`
+	Labels   map[string]string `json:"labels"`
+}
+
+func reserveComposeResources(ctx context.Context, command dockerCommand, identity identity, model composeModel, ledger *createdResourceLedger) error {
 	for _, resource := range resolvedResourceNames(identity, model) {
 		if resource.kind != "network" && resource.kind != "volume" {
 			continue
@@ -27,40 +71,85 @@ func reserveComposeResources(ctx context.Context, command dockerCommand, identit
 		if _, err := command.run(ctx, dockerMetadataOutputLimit, args...); err != nil {
 			return classifyReservationFailure(ctx, command, identity, resource, err)
 		}
-		labels, err := inspectReservedResource(ctx, command, resource)
+		inspected, err := inspectResource(ctx, command, resource)
 		if err != nil {
 			return fmt.Errorf("verify reserved Compose %s %q: %w", resource.kind, resource.name, err)
 		}
-		if !stringMapEqual(labels, identity.labels()) {
+		if !labelsContain(inspected.Labels, identity.labels()) {
 			return ErrProjectCollision
 		}
+		ledger.add(createdResource{kind: resource.kind, name: resource.name, daemonID: inspected.DaemonID})
 	}
 	return nil
 }
 
 func classifyReservationFailure(ctx context.Context, command dockerCommand, identity identity, resource resolvedResourceName, createErr error) error {
-	labels, inspectErr := inspectReservedResource(ctx, command, resource)
+	inspected, inspectErr := inspectResource(ctx, command, resource)
 	if inspectErr != nil {
 		return fmt.Errorf("reserve Compose %s %q: %w", resource.kind, resource.name, createErr)
 	}
-	if !stringMapEqual(labels, identity.labels()) {
+	if !labelsContain(inspected.Labels, identity.labels()) {
 		return errors.Join(ErrProjectCollision, createErr)
 	}
 	return errors.Join(ErrProjectExists, createErr)
 }
 
-func inspectReservedResource(ctx context.Context, command dockerCommand, resource resolvedResourceName) (map[string]string, error) {
+func inspectResource(ctx context.Context, command dockerCommand, resource resolvedResourceName) (inspectedResource, error) {
+	inspected, err := inspectResourceReference(ctx, command, resource.kind, resource.name, resource.inspectFormat)
+	if err != nil {
+		return inspectedResource{}, err
+	}
+	if inspected.Name != resource.name {
+		return inspectedResource{}, ErrProjectCollision
+	}
+	return inspected, nil
+}
+
+func inspectResourceReference(ctx context.Context, command dockerCommand, kind, reference, inspectFormat string) (inspectedResource, error) {
 	output, err := command.run(ctx, dockerMetadataOutputLimit,
-		resource.kind, "inspect", "--format", resource.inspectFormat, resource.name,
+		kind, "inspect", "--format", inspectFormat, reference,
 	)
 	if err != nil {
-		return nil, err
+		return inspectedResource{}, err
 	}
-	var labels map[string]string
-	if err := json.Unmarshal([]byte(strings.TrimSpace(string(output))), &labels); err != nil {
-		return nil, ErrProjectCollision
+	var inspected inspectedResource
+	if err := json.Unmarshal([]byte(strings.TrimSpace(string(output))), &inspected); err != nil {
+		return inspectedResource{}, ErrProjectCollision
 	}
-	return labels, nil
+	if kind == "container" {
+		inspected.Name = strings.TrimPrefix(inspected.Name, "/")
+	}
+	if inspected.Name == "" || inspected.DaemonID == "" {
+		return inspectedResource{}, ErrProjectCollision
+	}
+	return inspected, nil
+}
+
+func captureComposeContainers(ctx context.Context, command dockerCommand, identity identity, model composeModel, ledger *createdResourceLedger, requireAll bool) error {
+	for _, resource := range resolvedResourceNames(identity, model) {
+		if resource.kind != "container" {
+			continue
+		}
+		ids, err := findExactResourceIDs(ctx, command, resource)
+		if err != nil {
+			return err
+		}
+		if len(ids) == 0 {
+			if requireAll {
+				return fmt.Errorf("verify started Compose container %q: %w", resource.name, ErrProjectCollision)
+			}
+			continue
+		}
+		inspected, err := inspectResource(ctx, command, resource)
+		if err != nil {
+			return fmt.Errorf("verify started Compose container %q: %w", resource.name, err)
+		}
+		if !labelsContain(inspected.Labels, identity.labels()) {
+			return ErrProjectCollision
+		}
+		ledger.add(createdResource{kind: resource.kind, name: resource.name, daemonID: inspected.DaemonID})
+	}
+	return nil
 }
 
 func sortedOwnershipLabels(identity identity) []string {

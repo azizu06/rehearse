@@ -80,9 +80,12 @@ type runnerDocker struct {
 	reservedLabels      map[string]map[string]string
 	upReservedVolume    bool
 	upReservedNetwork   bool
+	resources           map[string]inspectedResource
+	removed             []createdResource
 }
 
 const testImageID = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+const testClaimID = "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"
 
 func (docker *runnerDocker) run(ctx context.Context, _ int64, args ...string) ([]byte, error) {
 	if containsSequence(args, "config", "--format", "json") {
@@ -132,24 +135,35 @@ func (docker *runnerDocker) run(ctx context.Context, _ int64, args ...string) ([
 			}
 		}
 		docker.reservedLabels[args[0]] = labels
+		name := args[len(args)-1]
 		if docker.lateCollision && args[0] == "volume" {
 			docker.collisionVisible = true
+			collisionLabels := make(map[string]string, len(labels)-1)
+			for key, value := range labels {
+				if key != sandboxClaimLabel {
+					collisionLabels[key] = value
+				}
+			}
+			docker.storeResource(inspectedResource{DaemonID: "late-volume-id", Name: name, Labels: collisionLabels}, args[0])
 			return nil, errors.New("docker create name conflict")
 		}
-		return []byte(args[len(args)-1] + "\n"), nil
+		docker.storeResource(inspectedResource{DaemonID: args[0] + "-id", Name: name, Labels: labels}, args[0])
+		return []byte(name + "\n"), nil
 	}
 	if len(args) >= 2 && (args[0] == "network" || args[0] == "volume") && args[1] == "inspect" {
-		if docker.collisionVisible && args[0] == "volume" {
-			return []byte(`{}`), nil
-		}
 		if docker.reservationMismatch == args[0] {
 			return []byte(`{}`), nil
 		}
-		return json.Marshal(docker.reservedLabels[args[0]])
+		if resource, exists := docker.findResource(args[0], args[len(args)-1]); exists {
+			return json.Marshal(resource)
+		}
+		return nil, errors.New("resource not found")
 	}
 	if len(args) >= 2 && (args[0] == "network" || args[0] == "volume") && args[1] == "ls" && strings.Contains(strings.Join(args, " "), "name=^") {
-		if docker.collisionVisible && args[0] == "volume" {
-			return []byte("unrelated-resource\n"), nil
+		for key, resource := range docker.resources {
+			if strings.HasPrefix(key, args[0]+"\x00") && strings.Contains(strings.Join(args, " "), "name=^"+resource.Name+"$") {
+				return []byte(resource.DaemonID + "\n"), nil
+			}
 		}
 		return nil, nil
 	}
@@ -191,7 +205,8 @@ func (docker *runnerDocker) run(ctx context.Context, _ int64, args ...string) ([
 		}
 		var snapshot struct {
 			Services map[string]struct {
-				Image string `json:"image"`
+				Image  string            `json:"image"`
+				Labels map[string]string `json:"labels"`
 			} `json:"services"`
 			Networks map[string]struct {
 				External bool   `json:"external"`
@@ -206,6 +221,10 @@ func (docker *runnerDocker) run(ctx context.Context, _ int64, args ...string) ([
 			return nil, err
 		}
 		docker.upSnapshotImage = snapshot.Services["worker"].Image
+		projectName := argumentAfter(args, "--project-name")
+		docker.storeResource(inspectedResource{
+			DaemonID: "container-id", Name: projectName + "-worker-1", Labels: snapshot.Services["worker"].Labels,
+		}, "container")
 		for _, resource := range snapshot.Networks {
 			docker.upReservedNetwork = resource.External && resource.Name != ""
 		}
@@ -218,11 +237,90 @@ func (docker *runnerDocker) run(ctx context.Context, _ int64, args ...string) ([
 		}
 		return nil, docker.upErr
 	}
-	if len(args) >= 2 && args[1] == "ls" && strings.Contains(strings.Join(args, " "), "label="+runFingerprintLabel+"=") {
-		docker.cleanupObserved = true
-		docker.cleanupContextErr = ctx.Err()
+	if len(args) >= 2 && args[1] == "ls" {
+		joined := strings.Join(args, " ")
+		if strings.Contains(joined, "label="+sandboxClaimLabel+"=") {
+			docker.cleanupObserved = true
+			docker.cleanupContextErr = ctx.Err()
+			return docker.listClaimed(args[0], joined), nil
+		}
+		if strings.Contains(joined, "name=^") {
+			for key, resource := range docker.resources {
+				if strings.HasPrefix(key, args[0]+"\x00") && strings.Contains(joined, "name=^/"+resource.Name+"$") {
+					return []byte(resource.DaemonID + "\n"), nil
+				}
+			}
+		}
+	}
+	if len(args) >= 2 && args[1] == "inspect" {
+		if resource, exists := docker.findResource(args[0], args[len(args)-1]); exists {
+			return json.Marshal(resource)
+		}
+		return nil, errors.New("resource not found")
+	}
+	if len(args) >= 4 && args[1] == "rm" {
+		if resource, exists := docker.findResource(args[0], args[len(args)-1]); exists {
+			delete(docker.resources, args[0]+"\x00"+resource.Name)
+			docker.removed = append(docker.removed, createdResource{kind: args[0], name: resource.Name, daemonID: resource.DaemonID})
+		}
 	}
 	return nil, nil
+}
+
+func (docker *runnerDocker) storeResource(resource inspectedResource, kind string) {
+	if docker.resources == nil {
+		docker.resources = make(map[string]inspectedResource)
+	}
+	docker.resources[kind+"\x00"+resource.Name] = resource
+}
+
+func (docker *runnerDocker) findResource(kind, reference string) (inspectedResource, bool) {
+	for key, resource := range docker.resources {
+		if strings.HasPrefix(key, kind+"\x00") && (resource.Name == reference || resource.DaemonID == reference) {
+			return resource, true
+		}
+	}
+	return inspectedResource{}, false
+}
+
+func (docker *runnerDocker) listClaimed(kind, joined string) []byte {
+	var result strings.Builder
+	for key, resource := range docker.resources {
+		if !strings.HasPrefix(key, kind+"\x00") {
+			continue
+		}
+		matched := true
+		for _, filter := range []string{managedLabel, projectLabel, runFingerprintLabel, runIDLabel, sandboxClaimLabel} {
+			marker := "label=" + filter + "="
+			index := strings.Index(joined, marker)
+			if index < 0 {
+				continue
+			}
+			value := strings.Fields(joined[index+len(marker):])[0]
+			if resource.Labels[filter] != value {
+				matched = false
+				break
+			}
+		}
+		if matched {
+			if kind == "volume" {
+				result.WriteString(resource.Name)
+			} else {
+				result.WriteString(resource.DaemonID)
+			}
+			result.WriteByte('\n')
+		}
+	}
+	return []byte(result.String())
+}
+
+func argumentAfter(values []string, key string) string {
+	for index := 0; index+1 < len(values); index++ {
+		if values[index] == key {
+			return values[index+1]
+		}
+	}
+	return ""
 }
 
 func TestRunnerAtomicallyReservesGeneratedResourcesBeforeComposeUp(t *testing.T) {
@@ -246,7 +344,7 @@ func TestRunnerAtomicallyReservesGeneratedResourcesBeforeComposeUp(t *testing.T)
 	}
 }
 
-func TestRunnerRejectsLateUnlabeledReservationCollisionBeforeStartingContainers(t *testing.T) {
+func TestRunnerRejectsLateStableLabelReservationCollisionWithoutDeletingIt(t *testing.T) {
 	command := &runnerDocker{includeVolume: true, lateCollision: true}
 	runner := testRunner(t, command, &recordingCleanupJournal{})
 	callbackCalled := false
@@ -258,8 +356,74 @@ func TestRunnerRejectsLateUnlabeledReservationCollisionBeforeStartingContainers(
 		t.Fatalf("Run error = %v, want ErrProjectCollision", err)
 	}
 	if callbackCalled || command.upCall != nil {
-		t.Fatal("runner started containers after a late unlabeled resource collision")
+		t.Fatal("runner started containers after a late stable-label resource collision")
 	}
+	var collisionSurvived bool
+	for key, resource := range command.resources {
+		if strings.HasPrefix(key, "volume\x00") && resource.Labels[sandboxClaimLabel] == "" {
+			collisionSurvived = true
+		}
+	}
+	if !collisionSurvived {
+		t.Fatal("runner deleted the late-colliding stable-label volume")
+	}
+	createdNetworkRemoved := false
+	for _, removed := range command.removed {
+		if removed.kind == "volume" {
+			t.Fatalf("runner removed late collision: %#v", removed)
+		}
+		if removed.kind == "network" {
+			createdNetworkRemoved = true
+		}
+	}
+	if !createdNetworkRemoved {
+		t.Fatal("runner failed to clean the network created before the collision")
+	}
+}
+
+func TestRunnerPreservesPreExistingExactStableLabelResource(t *testing.T) {
+	request := testRunnerRequest("run-preexisting-stable-labels", time.Minute)
+	stableIdentity, _ := newIdentity(request.RunID)
+	command := &stableCollisionDocker{identity: stableIdentity}
+	root := t.TempDir()
+	runner := &DockerRunner{
+		command: command,
+		cleaner: cleaner{command: command, waiter: &recordingWaiter{}, quiescence: cleanupQuiescence, snapshotRoot: root},
+		journal: &recordingCleanupJournal{}, locker: newProjectLocker(filepath.Join(root, "locks")),
+		temporaryRoot: root, cleanupTimeout: time.Second,
+		newClaimID: func() (string, error) { return testClaimID, nil },
+	}
+	_, err := runner.Run(context.Background(), request, func(context.Context, Instance) error {
+		t.Fatal("callback ran after a pre-existing collision")
+		return nil
+	})
+	if !errors.Is(err, ErrProjectExists) {
+		t.Fatalf("Run error = %v, want ErrProjectExists", err)
+	}
+	if command.removed {
+		t.Fatal("runner deleted the pre-existing stable-label resource")
+	}
+}
+
+type stableCollisionDocker struct {
+	identity identity
+	removed  bool
+}
+
+func (docker *stableCollisionDocker) run(_ context.Context, _ int64, args ...string) ([]byte, error) {
+	joined := strings.Join(args, " ")
+	if len(args) >= 2 && args[0] == "volume" && args[1] == "ls" &&
+		strings.Contains(joined, "label="+projectLabel+"="+docker.identity.projectName) &&
+		!strings.Contains(joined, "label="+sandboxClaimLabel+"=") {
+		return []byte("pre-existing-volume\n"), nil
+	}
+	if len(args) >= 2 && args[0] == "volume" && args[1] == "inspect" {
+		return []byte(docker.identity.fingerprint + "\n"), nil
+	}
+	if len(args) >= 2 && args[1] == "rm" {
+		docker.removed = true
+	}
+	return nil, nil
 }
 
 func TestRunnerRejectsReservationWhoseImmediateOwnershipVerificationMismatches(t *testing.T) {
@@ -451,6 +615,7 @@ func testRunner(t *testing.T, command *runnerDocker, journal CleanupJournal) *Do
 		cleaner: cleaner{command: command, waiter: &recordingWaiter{}, quiescence: cleanupQuiescence, snapshotRoot: root},
 		journal: journal, locker: newProjectLocker(filepath.Join(root, "locks")),
 		temporaryRoot: root, cleanupTimeout: time.Second,
+		newClaimID: func() (string, error) { return testClaimID, nil },
 	}
 }
 
@@ -464,10 +629,12 @@ func testRunnerRequest(runID string, duration time.Duration) Request {
 type recordingCleanupJournal struct {
 	mu       sync.Mutex
 	claimErr error
+	claimID  string
 	statuses []drill.CleanupStatus
 }
 
-func (journal *recordingCleanupJournal) ClaimSandboxCleanup(context.Context, string, time.Time) error {
+func (journal *recordingCleanupJournal) ClaimSandboxCleanup(_ context.Context, _, claimID string, _ time.Time) error {
+	journal.claimID = claimID
 	return journal.claimErr
 }
 

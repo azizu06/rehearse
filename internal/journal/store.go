@@ -5,6 +5,7 @@ package journal
 import (
 	"context"
 	"database/sql"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -215,8 +216,8 @@ func (store *Store) Run(ctx context.Context, id string) (drill.Run, error) {
 
 // ClaimSandboxCleanup durably establishes cleanup ownership before Docker can
 // create resources for one run.
-func (store *Store) ClaimSandboxCleanup(ctx context.Context, id string, at time.Time) error {
-	if at.IsZero() {
+func (store *Store) ClaimSandboxCleanup(ctx context.Context, id, claimID string, at time.Time) error {
+	if at.IsZero() || !validSandboxClaimID(claimID) {
 		return drill.ErrInvalidRun
 	}
 	transaction, err := store.database.BeginTx(ctx, nil)
@@ -232,9 +233,9 @@ func (store *Store) ClaimSandboxCleanup(ctx context.Context, id string, at time.
 		return drill.ErrInvalidRun
 	}
 	if _, err := transaction.ExecContext(ctx, `
-        INSERT INTO sandbox_cleanup_claims(run_id, status, claimed_at, updated_at)
-        VALUES (?, 'pending', ?, ?)
-    `, id, formatTime(at), formatTime(at)); err != nil {
+		INSERT INTO sandbox_cleanup_claims(run_id, claim_id, status, claimed_at, updated_at)
+		VALUES (?, ?, 'pending', ?, ?)
+	`, id, claimID, formatTime(at), formatTime(at)); err != nil {
 		if strings.Contains(err.Error(), "UNIQUE constraint failed") {
 			return ErrSandboxClaimed
 		}
@@ -244,6 +245,31 @@ func (store *Store) ClaimSandboxCleanup(ctx context.Context, id string, at time.
 		return fmt.Errorf("commit sandbox cleanup claim: %w", err)
 	}
 	return nil
+}
+
+// SandboxCleanupClaim returns the active deletion authority for one run.
+func (store *Store) SandboxCleanupClaim(ctx context.Context, id string) (string, bool, error) {
+	var claimID string
+	err := store.database.QueryRowContext(ctx, `
+		SELECT claim_id
+		FROM sandbox_cleanup_claims
+		WHERE run_id = ? AND status IN ('pending', 'failed')
+	`, id).Scan(&claimID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", false, nil
+	}
+	if err != nil {
+		return "", false, fmt.Errorf("load sandbox cleanup claim: %w", err)
+	}
+	if !validSandboxClaimID(claimID) {
+		return "", false, nil
+	}
+	return claimID, true, nil
+}
+
+func validSandboxClaimID(claimID string) bool {
+	decoded, err := hex.DecodeString(claimID)
+	return err == nil && len(decoded) == 32 && claimID == strings.ToLower(claimID)
 }
 
 // RecordSandboxCleanup closes or preserves the durable sandbox cleanup claim.

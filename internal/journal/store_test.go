@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -16,6 +17,8 @@ import (
 	"github.com/azizu06/rehearse/internal/drill"
 	"github.com/azizu06/rehearse/internal/journal"
 )
+
+const testSandboxClaimID = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
 
 func TestJournalOwnershipExcludesLiveProcessAndReleasesAfterCrash(t *testing.T) {
 	ctx := context.Background()
@@ -117,7 +120,7 @@ func TestJournalOwnershipHelper(t *testing.T) {
 	if _, err := store.CreateRun(ctx, "run-owned", plan.ID, plan.Version, now); err != nil {
 		t.Fatalf("CreateRun: %v", err)
 	}
-	if err := store.ClaimSandboxCleanup(ctx, "run-owned", now.Add(time.Second)); err != nil {
+	if err := store.ClaimSandboxCleanup(ctx, "run-owned", testSandboxClaimID, now.Add(time.Second)); err != nil {
 		t.Fatalf("ClaimSandboxCleanup: %v", err)
 	}
 	if err := os.WriteFile(os.Getenv("REHEARSE_JOURNAL_OWNER_READY"), []byte("ready"), 0o600); err != nil {
@@ -345,13 +348,20 @@ func TestSandboxCleanupClaimRequiresOneDurableRunAndQueuesFailures(t *testing.T)
 	store, _, run := createPlanAndRun(t, ctx, filepath.Join(t.TempDir(), "rehearse.db"), now)
 	t.Cleanup(func() { _ = store.Close() })
 
-	if err := store.ClaimSandboxCleanup(ctx, "missing-run", now); !errors.Is(err, journal.ErrNotFound) {
+	if err := store.ClaimSandboxCleanup(ctx, run.ID, "not-a-claim", now); !errors.Is(err, drill.ErrInvalidRun) {
+		t.Fatalf("ClaimSandboxCleanup(invalid claim) error = %v, want ErrInvalidRun", err)
+	}
+	if err := store.ClaimSandboxCleanup(ctx, "missing-run", testSandboxClaimID, now); !errors.Is(err, journal.ErrNotFound) {
 		t.Fatalf("ClaimSandboxCleanup(missing) error = %v, want ErrNotFound", err)
 	}
-	if err := store.ClaimSandboxCleanup(ctx, run.ID, now.Add(time.Second)); err != nil {
+	if err := store.ClaimSandboxCleanup(ctx, run.ID, testSandboxClaimID, now.Add(time.Second)); err != nil {
 		t.Fatalf("ClaimSandboxCleanup: %v", err)
 	}
-	if err := store.ClaimSandboxCleanup(ctx, run.ID, now.Add(2*time.Second)); !errors.Is(err, journal.ErrSandboxClaimed) {
+	claimID, active, err := store.SandboxCleanupClaim(ctx, run.ID)
+	if err != nil || !active || claimID != testSandboxClaimID {
+		t.Fatalf("SandboxCleanupClaim = %q active=%t error=%v", claimID, active, err)
+	}
+	if err := store.ClaimSandboxCleanup(ctx, run.ID, strings.Repeat("a", 64), now.Add(2*time.Second)); !errors.Is(err, journal.ErrSandboxClaimed) {
 		t.Fatalf("second ClaimSandboxCleanup error = %v, want ErrSandboxClaimed", err)
 	}
 	queued, err := store.RunsNeedingReconciliation(ctx)
@@ -368,11 +378,14 @@ func TestSandboxCleanupClaimRequiresOneDurableRunAndQueuesFailures(t *testing.T)
 	if err := store.RecordSandboxCleanup(ctx, run.ID, drill.CleanupSucceeded, now.Add(4*time.Second)); err != nil {
 		t.Fatalf("RecordSandboxCleanup(succeeded): %v", err)
 	}
+	if claimID, active, err := store.SandboxCleanupClaim(ctx, run.ID); err != nil || active || claimID != "" {
+		t.Fatalf("completed SandboxCleanupClaim = %q active=%t error=%v", claimID, active, err)
+	}
 	queued, err = store.RunsNeedingReconciliation(ctx)
 	if err != nil || len(queued) != 0 {
 		t.Fatalf("successful cleanup queue = %#v, error %v", queued, err)
 	}
-	if err := store.ClaimSandboxCleanup(ctx, run.ID, now.Add(5*time.Second)); !errors.Is(err, journal.ErrSandboxClaimed) {
+	if err := store.ClaimSandboxCleanup(ctx, run.ID, strings.Repeat("b", 64), now.Add(5*time.Second)); !errors.Is(err, journal.ErrSandboxClaimed) {
 		t.Fatalf("post-success ClaimSandboxCleanup error = %v, want ErrSandboxClaimed", err)
 	}
 }
@@ -384,7 +397,7 @@ func TestSandboxClaimAndJanitorQueueStayExclusiveAcrossTransition(t *testing.T) 
 	now := time.Date(2026, time.July, 15, 18, 30, 0, 0, time.UTC)
 	store, _, run := createPlanAndRun(t, ctx, filepath.Join(t.TempDir(), "rehearse.db"), now)
 	t.Cleanup(func() { _ = store.Close() })
-	if err := store.ClaimSandboxCleanup(ctx, run.ID, now.Add(time.Second)); err != nil {
+	if err := store.ClaimSandboxCleanup(ctx, run.ID, testSandboxClaimID, now.Add(time.Second)); err != nil {
 		t.Fatalf("ClaimSandboxCleanup: %v", err)
 	}
 
@@ -429,7 +442,7 @@ func TestSandboxOutcomeCannotEnterJanitorQueueBeforeLiveCleanupCloses(t *testing
 	now := time.Date(2026, time.July, 15, 18, 45, 0, 0, time.UTC)
 	store, _, run := createPlanAndRun(t, ctx, filepath.Join(t.TempDir(), "rehearse.db"), now)
 	t.Cleanup(func() { _ = store.Close() })
-	if err := store.ClaimSandboxCleanup(ctx, run.ID, now.Add(time.Second)); err != nil {
+	if err := store.ClaimSandboxCleanup(ctx, run.ID, testSandboxClaimID, now.Add(time.Second)); err != nil {
 		t.Fatalf("ClaimSandboxCleanup: %v", err)
 	}
 
@@ -478,7 +491,7 @@ func TestInterruptedSandboxClaimEntersJanitorQueueAfterRestart(t *testing.T) {
 	now := time.Date(2026, time.July, 15, 18, 50, 0, 0, time.UTC)
 	path := filepath.Join(t.TempDir(), "rehearse.db")
 	store, _, run := createPlanAndRun(t, ctx, path, now)
-	if err := store.ClaimSandboxCleanup(ctx, run.ID, now.Add(time.Second)); err != nil {
+	if err := store.ClaimSandboxCleanup(ctx, run.ID, testSandboxClaimID, now.Add(time.Second)); err != nil {
 		t.Fatalf("ClaimSandboxCleanup: %v", err)
 	}
 	if err := store.Close(); err != nil {
@@ -515,7 +528,7 @@ func TestSandboxCleanupClaimRejectsJanitorOwnedRuns(t *testing.T) {
 			t.Fatalf("reopen: %v", err)
 		}
 		t.Cleanup(func() { _ = reopened.Close() })
-		if err := reopened.ClaimSandboxCleanup(ctx, run.ID, now.Add(2*time.Second)); !errors.Is(err, drill.ErrInvalidRun) {
+		if err := reopened.ClaimSandboxCleanup(ctx, run.ID, testSandboxClaimID, now.Add(2*time.Second)); !errors.Is(err, drill.ErrInvalidRun) {
 			t.Fatalf("ClaimSandboxCleanup error = %v, want ErrInvalidRun", err)
 		}
 		queued, err := reopened.RunsNeedingReconciliation(ctx)
@@ -530,7 +543,7 @@ func TestSandboxCleanupClaimRejectsJanitorOwnedRuns(t *testing.T) {
 		if _, err := store.RecordOutcome(ctx, run.ID, drill.OutcomeFailed, now.Add(time.Second)); err != nil {
 			t.Fatalf("RecordOutcome: %v", err)
 		}
-		if err := store.ClaimSandboxCleanup(ctx, run.ID, now.Add(2*time.Second)); !errors.Is(err, drill.ErrInvalidRun) {
+		if err := store.ClaimSandboxCleanup(ctx, run.ID, testSandboxClaimID, now.Add(2*time.Second)); !errors.Is(err, drill.ErrInvalidRun) {
 			t.Fatalf("ClaimSandboxCleanup error = %v, want ErrInvalidRun", err)
 		}
 		queued, err := store.RunsNeedingReconciliation(ctx)

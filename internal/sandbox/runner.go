@@ -20,6 +20,7 @@ type DockerRunner struct {
 	locker         projectLocker
 	temporaryRoot  string
 	cleanupTimeout time.Duration
+	newClaimID     func() (string, error)
 }
 
 // NewDockerRunner creates a runner without contacting Docker. Run performs
@@ -41,6 +42,7 @@ func NewDockerRunner(options DockerRunnerOptions) *DockerRunner {
 		locker:         newProjectLocker(options.LockRoot),
 		temporaryRoot:  filepath.Clean(temporaryRoot),
 		cleanupTimeout: cleanupTimeout,
+		newClaimID:     generateClaimID,
 	}
 }
 
@@ -73,12 +75,25 @@ func (runner *DockerRunner) Run(
 		return instance, err
 	}
 	defer func() { resultErr = errors.Join(resultErr, lock.release()) }()
-	if err := runner.journal.ClaimSandboxCleanup(ctx, normalized.RunID, time.Now().UTC()); err != nil {
+	claimIDGenerator := runner.newClaimID
+	if claimIDGenerator == nil {
+		claimIDGenerator = generateClaimID
+	}
+	claimID, err := claimIDGenerator()
+	if err != nil {
+		return instance, err
+	}
+	normalized.identity, err = normalized.identity.withClaimID(claimID)
+	if err != nil {
+		return instance, err
+	}
+	if err := runner.journal.ClaimSandboxCleanup(ctx, normalized.RunID, claimID, time.Now().UTC()); err != nil {
 		return instance, fmt.Errorf("claim durable sandbox cleanup: %w", err)
 	}
+	ledger := newCreatedResourceLedger()
 	defer func() {
 		cleanupContext, cleanupCancel := context.WithTimeout(context.WithoutCancel(ctx), runner.cleanupTimeout)
-		cleanupErr := runner.cleaner.cleanup(cleanupContext, normalized.identity)
+		cleanupErr := runner.cleaner.cleanupCreated(cleanupContext, normalized.identity, ledger)
 		cleanupCancel()
 		status := drill.CleanupSucceeded
 		if cleanupErr != nil {
@@ -141,7 +156,7 @@ func (runner *DockerRunner) Run(
 	if err != nil {
 		return instance, fmt.Errorf("validate pinned Compose snapshot: %w", err)
 	}
-	if err := reserveComposeResources(runContext, runner.command, normalized.identity, snapshotModel); err != nil {
+	if err := reserveComposeResources(runContext, runner.command, normalized.identity, snapshotModel, ledger); err != nil {
 		return instance, err
 	}
 	snapshotData, err = rewriteSnapshotReservedResources(snapshotData, normalized.identity, snapshotModel)
@@ -164,8 +179,14 @@ func (runner *DockerRunner) Run(
 		"--no-build", "--pull", "never",
 	)
 	_, startErr := runner.command.run(runContext, normalized.Limits.OutputBytes, upArgs...)
+	captureContext, captureCancel := context.WithTimeout(context.WithoutCancel(ctx), runner.cleanupTimeout)
+	captureErr := captureComposeContainers(captureContext, runner.command, normalized.identity, snapshotModel, ledger, startErr == nil)
+	captureCancel()
 	if startErr != nil {
-		return instance, fmt.Errorf("start Compose sandbox: %w", startErr)
+		return instance, fmt.Errorf("start Compose sandbox: %w", errors.Join(startErr, captureErr))
+	}
+	if captureErr != nil {
+		return instance, captureErr
 	}
 	callback := make(chan callbackResult, 1)
 	go invokeCallback(runContext, instance, use, callback)

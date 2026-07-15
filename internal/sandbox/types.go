@@ -4,7 +4,9 @@ package sandbox
 
 import (
 	"context"
+	"crypto/rand"
 	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"math"
@@ -23,8 +25,10 @@ const (
 	projectLabel        = "dev.rehearse.project"
 	runFingerprintLabel = "dev.rehearse.run-fingerprint"
 	runIDLabel          = "dev.rehearse.run-id"
+	sandboxClaimLabel   = "dev.rehearse.sandbox-claim"
 	projectPrefix       = "rehearse-"
 	projectDigestLength = 24
+	sandboxClaimBytes   = 32
 	maxComposeKeyLength = 26
 )
 
@@ -78,7 +82,7 @@ type DockerRunnerOptions struct {
 // CleanupJournal is the narrow durable ownership seam shared with startup
 // reconciliation.
 type CleanupJournal interface {
-	ClaimSandboxCleanup(context.Context, string, time.Time) error
+	ClaimSandboxCleanup(context.Context, string, string, time.Time) error
 	RecordSandboxCleanup(context.Context, string, drill.CleanupStatus, time.Time) error
 }
 
@@ -93,6 +97,7 @@ type identity struct {
 	runID       string
 	fingerprint string
 	projectName string
+	claimID     string
 }
 
 type normalizedRequest struct {
@@ -119,12 +124,33 @@ func newIdentityWithDigest(runID string, digest [sha256.Size]byte) (identity, er
 }
 
 func (value identity) labels() map[string]string {
-	return map[string]string{
+	labels := map[string]string{
 		managedLabel:        "true",
 		projectLabel:        value.projectName,
 		runFingerprintLabel: value.fingerprint,
 		runIDLabel:          value.runID,
 	}
+	if value.claimID != "" {
+		labels[sandboxClaimLabel] = value.claimID
+	}
+	return labels
+}
+
+func (value identity) withClaimID(claimID string) (identity, error) {
+	decoded, err := hex.DecodeString(claimID)
+	if err != nil || len(decoded) != sandboxClaimBytes || claimID != strings.ToLower(claimID) {
+		return identity{}, fmt.Errorf("%w: sandbox claim ID must be 64 lowercase hexadecimal characters", ErrInvalidRequest)
+	}
+	value.claimID = claimID
+	return value, nil
+}
+
+func generateClaimID() (string, error) {
+	random := make([]byte, sandboxClaimBytes)
+	if _, err := rand.Read(random); err != nil {
+		return "", fmt.Errorf("generate sandbox claim ID: %w", err)
+	}
+	return hex.EncodeToString(random), nil
 }
 
 func normalizeRequest(request Request) (normalizedRequest, error) {

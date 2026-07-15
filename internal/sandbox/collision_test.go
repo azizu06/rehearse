@@ -98,7 +98,7 @@ func (docker *exactCollisionDocker) run(_ context.Context, _ int64, args ...stri
 		return []byte("resource-id\n"), nil
 	}
 	if len(args) >= 2 && args[0] == docker.kind && args[1] == "inspect" {
-		return json.Marshal(docker.labels)
+		return json.Marshal(inspectedResource{DaemonID: "resource-id", Name: docker.name, Labels: docker.labels})
 	}
 	return nil, nil
 }

@@ -2,7 +2,6 @@ package sandbox
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"regexp"
 	"sort"
@@ -50,38 +49,40 @@ func ensureProjectVacant(ctx context.Context, command dockerCommand, identity id
 func ensureResolvedProjectVacant(ctx context.Context, command dockerCommand, identity identity, model composeModel) error {
 	resources := resolvedResourceNames(identity, model)
 	for _, resource := range resources {
-		filterName := resource.name
-		if resource.kind == "container" {
-			filterName = "/" + filterName
-		}
-		filter := "name=^" + regexp.QuoteMeta(filterName) + "$"
-		args := []string{resource.kind, "ls"}
-		if resource.all != "" {
-			args = append(args, resource.all)
-		}
-		args = append(args, "--quiet", "--filter", filter)
-		output, err := command.run(ctx, dockerMetadataOutputLimit, args...)
+		ids, err := findExactResourceIDs(ctx, command, resource)
 		if err != nil {
 			return fmt.Errorf("inspect exact Compose %s name %q: %w", resource.kind, resource.name, err)
 		}
-		for _, id := range strings.Fields(string(output)) {
-			labelsOutput, err := command.run(ctx, dockerMetadataOutputLimit,
-				resource.kind, "inspect", "--format", resource.inspectFormat, id,
-			)
+		for range ids {
+			inspected, err := inspectResource(ctx, command, resource)
 			if err != nil {
 				return fmt.Errorf("inspect exact Compose %s %q ownership: %w", resource.kind, resource.name, err)
 			}
-			var labels map[string]string
-			if err := json.Unmarshal([]byte(strings.TrimSpace(string(labelsOutput))), &labels); err != nil {
-				return ErrProjectCollision
-			}
-			if !labelsContain(labels, identity.labels()) {
+			if !labelsContain(inspected.Labels, identity.labels()) {
 				return ErrProjectCollision
 			}
 			return ErrProjectExists
 		}
 	}
 	return nil
+}
+
+func findExactResourceIDs(ctx context.Context, command dockerCommand, resource resolvedResourceName) ([]string, error) {
+	filterName := resource.name
+	if resource.kind == "container" {
+		filterName = "/" + filterName
+	}
+	filter := "name=^" + regexp.QuoteMeta(filterName) + "$"
+	args := []string{resource.kind, "ls"}
+	if resource.all != "" {
+		args = append(args, resource.all)
+	}
+	args = append(args, "--quiet", "--filter", filter)
+	output, err := command.run(ctx, dockerMetadataOutputLimit, args...)
+	if err != nil {
+		return nil, err
+	}
+	return strings.Fields(string(output)), nil
 }
 
 type resolvedResourceName struct {
@@ -91,13 +92,30 @@ type resolvedResourceName struct {
 	inspectFormat string
 }
 
+func resourceDescriptor(kind, name string) resolvedResourceName {
+	switch kind {
+	case "container":
+		return resolvedResourceName{
+			kind: kind, name: name, all: "--all",
+			inspectFormat: `{"id":{{json .Id}},"name":{{json .Name}},"labels":{{json .Config.Labels}}}`,
+		}
+	case "network":
+		return resolvedResourceName{
+			kind: kind, name: name,
+			inspectFormat: `{"id":{{json .Id}},"name":{{json .Name}},"labels":{{json .Labels}}}`,
+		}
+	default:
+		return resolvedResourceName{
+			kind: kind, name: name,
+			inspectFormat: `{"id":{{json .CreatedAt}},"name":{{json .Name}},"labels":{{json .Labels}}}`,
+		}
+	}
+}
+
 func resolvedResourceNames(identity identity, model composeModel) []resolvedResourceName {
 	resources := make([]resolvedResourceName, 0, len(model.Services)+len(model.Networks)+len(model.Volumes)+1)
 	for name := range model.Services {
-		resources = append(resources, resolvedResourceName{
-			kind: "container", name: identity.projectName + "-" + name + "-1", all: "--all",
-			inspectFormat: `{{json .Config.Labels}}`,
-		})
+		resources = append(resources, resourceDescriptor("container", identity.projectName+"-"+name+"-1"))
 	}
 	networks := make(map[string]composeResource, len(model.Networks)+1)
 	for name, network := range model.Networks {
@@ -112,16 +130,10 @@ func resolvedResourceNames(identity identity, model composeModel) []resolvedReso
 		}
 	}
 	for name, network := range networks {
-		resources = append(resources, resolvedResourceName{
-			kind: "network", name: resolvedComposeResourceName(identity, name, network),
-			inspectFormat: `{{json .Labels}}`,
-		})
+		resources = append(resources, resourceDescriptor("network", resolvedComposeResourceName(identity, name, network)))
 	}
 	for name, volume := range model.Volumes {
-		resources = append(resources, resolvedResourceName{
-			kind: "volume", name: resolvedComposeResourceName(identity, name, volume),
-			inspectFormat: `{{json .Labels}}`,
-		})
+		resources = append(resources, resourceDescriptor("volume", resolvedComposeResourceName(identity, name, volume)))
 	}
 	sort.Slice(resources, func(left, right int) bool {
 		if resources[left].kind == resources[right].kind {
@@ -149,6 +161,9 @@ func ownershipFilters(identity identity, includeFingerprint bool) []string {
 			"--filter", "label="+runFingerprintLabel+"="+identity.fingerprint,
 			"--filter", "label="+runIDLabel+"="+identity.runID,
 		)
+		if identity.claimID != "" {
+			filters = append(filters, "--filter", "label="+sandboxClaimLabel+"="+identity.claimID)
+		}
 	}
 	return filters
 }

@@ -23,6 +23,22 @@ func TestIdentityUsesBoundedDigestAndFullFingerprintLabel(t *testing.T) {
 	}
 }
 
+func TestIdentityRequiresAndAppliesHighEntropySandboxClaim(t *testing.T) {
+	identity, _ := newIdentity("run-claim")
+	claimed, err := identity.withClaimID(testClaimID)
+	if err != nil {
+		t.Fatalf("withClaimID: %v", err)
+	}
+	if got := claimed.labels()[sandboxClaimLabel]; got != testClaimID {
+		t.Fatalf("sandbox claim label = %q, want %q", got, testClaimID)
+	}
+	for _, invalid := range []string{"", "abc", strings.Repeat("A", 64), strings.Repeat("g", 64)} {
+		if _, err := identity.withClaimID(invalid); !errors.Is(err, ErrInvalidRequest) {
+			t.Fatalf("withClaimID(%q) error = %v, want ErrInvalidRequest", invalid, err)
+		}
+	}
+}
+
 func TestRequestValidationRejectsInvalidBounds(t *testing.T) {
 	valid := Request{
 		RunID:        "run-1",
