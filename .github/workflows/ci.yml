@@ -70,6 +70,25 @@ jobs:
         run: npm --prefix web exec -- playwright install chromium
       - run: make test-browser
 
+  adapter-integration:
+    name: Restic adapter integration
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: false
+      - name: Install verified restic 0.19.1
+        run: |
+          curl --fail --silent --show-error --location --remote-name https://github.com/restic/restic/releases/download/v0.19.1/restic_0.19.1_linux_amd64.bz2
+          curl --fail --silent --show-error --location --remote-name https://github.com/restic/restic/releases/download/v0.19.1/SHA256SUMS
+          grep ' restic_0.19.1_linux_amd64.bz2$' SHA256SUMS | sha256sum --check --strict -
+          bunzip2 restic_0.19.1_linux_amd64.bz2
+          install -m 0755 restic_0.19.1_linux_amd64 "$RUNNER_TEMP/restic"
+          echo "$RUNNER_TEMP" >> "$GITHUB_PATH"
+      - run: make test-adapters-race
+
   static-security:
     runs-on: ubuntu-latest
     steps:

@@ -97,3 +97,9 @@ func (reference CredentialReference) validate() error {
 	}
 	return nil
 }
+
+// Validate checks that a credential reference cannot carry an inline value and
+// uses a locator shape supported by its provider.
+func (reference CredentialReference) Validate() error {
+	return reference.validate()
+}

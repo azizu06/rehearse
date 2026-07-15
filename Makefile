@@ -5,8 +5,9 @@ PORT ?= 14194
 TRIVY ?= trivy
 TRIVY_VERSION := 0.72.0
 VERSION ?= dev
+RESTIC_TEST_BINARY ?= restic
 
-.PHONY: build e2e-server lint security static test test-browser test-race trivy web-build
+.PHONY: build e2e-server lint security static test test-adapters test-adapters-race test-browser test-race trivy web-build
 
 test:
 	go test ./...
@@ -14,6 +15,14 @@ test:
 
 test-race:
 	go test -race ./...
+
+test-adapters:
+	@command -v "$(RESTIC_TEST_BINARY)" >/dev/null || { echo "restic >= 0.18.0 is required"; exit 1; }
+	RESTIC_TEST_BINARY="$$(command -v "$(RESTIC_TEST_BINARY)")" go test -tags=integration ./internal/source/restic
+
+test-adapters-race:
+	@command -v "$(RESTIC_TEST_BINARY)" >/dev/null || { echo "restic >= 0.18.0 is required"; exit 1; }
+	RESTIC_TEST_BINARY="$$(command -v "$(RESTIC_TEST_BINARY)")" go test -race -tags=integration ./internal/source/restic
 
 lint:
 	go vet ./...
