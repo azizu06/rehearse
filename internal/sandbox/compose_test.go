@@ -1,6 +1,7 @@
 package sandbox
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -24,6 +25,7 @@ func TestComposeSafetyRejectsEscapeAndUnboundedFeatures(t *testing.T) {
 		{name: "host PID", model: `{"services":{"worker":{"image":"alpine","pid":"host"}}}`},
 		{name: "published port", model: `{"services":{"worker":{"image":"alpine","ports":[{"target":80,"published":"8080"}]}}}`},
 		{name: "bind mount", model: `{"services":{"worker":{"image":"alpine","volumes":[{"type":"bind","source":"/","target":"/host"}]}}}`},
+		{name: "anonymous volume", model: `{"services":{"worker":{"image":"alpine","volumes":[{"type":"volume","target":"/data"}]}}}`},
 		{name: "Docker socket", model: `{"services":{"worker":{"image":"alpine","volumes":[{"type":"volume","source":"sock","target":"/var/run/docker.sock"}]}},"volumes":{"sock":{"name":"rehearse-test_sock"}}}`},
 		{name: "external volume", model: `{"services":{"worker":{"image":"alpine"}},"volumes":{"data":{"external":true,"name":"data"}}}`},
 		{name: "custom volume name", model: `{"services":{"worker":{"image":"alpine"}},"volumes":{"data":{"name":"shared"}}}`},
@@ -107,6 +109,28 @@ func TestExecutionSnapshotRejectsNonGeneratedResourceFields(t *testing.T) {
 			delete(service, mutation.field)
 		})
 	}
+}
+
+func TestImageVolumeDeclarationRequiresAnAttributableMount(t *testing.T) {
+	command := imageVolumeDocker([]byte(`{"/var/lib/data":{}}`))
+	model := composeModel{Services: map[string]composeService{
+		"worker": {Image: "local-image"},
+	}}
+	if err := validateImageVolumeDeclarations(context.Background(), command, model); !errors.Is(err, ErrUnsafeCompose) {
+		t.Fatalf("uncovered image volume error = %v, want ErrUnsafeCompose", err)
+	}
+	service := model.Services["worker"]
+	service.Volumes = []composeMount{{Type: "volume", Source: "work", Target: "/var/lib/data"}}
+	model.Services["worker"] = service
+	if err := validateImageVolumeDeclarations(context.Background(), command, model); err != nil {
+		t.Fatalf("named mount coverage: %v", err)
+	}
+}
+
+type imageVolumeDocker []byte
+
+func (output imageVolumeDocker) run(context.Context, int64, ...string) ([]byte, error) {
+	return output, nil
 }
 
 func TestComposeSafetyAcceptsProjectScopedSingleReplicaModel(t *testing.T) {

@@ -111,7 +111,7 @@ func (cleaner cleaner) removePass(ctx context.Context, identity identity) (bool,
 		listArgs   []string
 		removeArgs []string
 	}{
-		{name: "container", listArgs: []string{"container", "ls", "--all", "--quiet"}, removeArgs: []string{"container", "rm", "--force", "--volumes"}},
+		{name: "container", listArgs: []string{"container", "ls", "--all", "--quiet"}, removeArgs: []string{"container", "rm", "--force"}},
 		{name: "network", listArgs: []string{"network", "ls", "--quiet"}, removeArgs: []string{"network", "rm", "--force"}},
 		{name: "volume", listArgs: []string{"volume", "ls", "--quiet"}, removeArgs: []string{"volume", "rm", "--force"}},
 	}

@@ -217,7 +217,7 @@ func (store *Store) ClaimSandboxCleanup(ctx context.Context, id string, at time.
 	if err != nil {
 		return err
 	}
-	if run.Terminal() {
+	if run.Stage == drill.StageCleanup || run.Outcome != "" || run.Cleanup != drill.CleanupNotStarted || run.NeedsReconciliation || !run.ReconciliationRequestedAt.IsZero() {
 		return drill.ErrInvalidRun
 	}
 	if _, err := transaction.ExecContext(ctx, `
@@ -314,7 +314,7 @@ func (store *Store) RunsNeedingReconciliation(ctx context.Context) ([]drill.Run,
            OR EXISTS (
                SELECT 1 FROM sandbox_cleanup_claims
                WHERE sandbox_cleanup_claims.run_id = runs.id
-                 AND sandbox_cleanup_claims.status IN ('pending', 'failed')
+                 AND sandbox_cleanup_claims.status = 'failed'
            )
         ORDER BY id
     `)

@@ -126,8 +126,12 @@ func (runner *DockerRunner) Run(
 		return instance, fmt.Errorf("render constrained Compose snapshot: %w", err)
 	}
 	snapshotData := escapeSnapshotInterpolation(rendered)
-	if _, err := parseAndValidateSnapshot(snapshotData, normalized.identity, normalized.Limits); err != nil {
+	snapshotModel, err := parseAndValidateSnapshot(snapshotData, normalized.identity, normalized.Limits)
+	if err != nil {
 		return instance, fmt.Errorf("validate constrained Compose snapshot: %w", err)
+	}
+	if err := validateImageVolumeDeclarations(runContext, runner.command, snapshotModel); err != nil {
+		return instance, fmt.Errorf("validate service image volume policy: %w", err)
 	}
 	snapshotPath, err := writeSnapshotFile(snapshotDirectory, snapshotFileName, snapshotData)
 	if err != nil {

@@ -41,8 +41,9 @@ The v0.1 fail-closed field set rejects top-level `configs`, `models`, and
 `models`, OOM/shm/storage/tmpfs/ulimit policy, lifecycle hooks, ports,
 `privileged`, host-executed `provider`, caller pull/restart policy, custom
 runtime, `secrets`, `security_opt`, sysctls, `use_api_socket`, unsupported
-mounts, and `volumes_from`. Networks also reject attachability, caller IPAM,
-driver options, external/custom names, and per-service interface/address
+mounts, image-declared `VOLUME` targets without an attributable named-volume or
+tmpfs mount, and `volumes_from`. Networks also reject attachability, caller
+IPAM, driver options, external/custom names, and per-service interface/address
 policy; volumes reject external/custom names, driver options, and non-local
 drivers.
 
@@ -57,16 +58,21 @@ and startup reconciliation after a process crash.
 Cleanup lists, inspects, and deletes only resources matching the Rehearse
 managed, project, and full run-fingerprint labels. It uses a fresh bounded
 context after success, failure, cancellation, timeout, or output overflow.
+Container removal never cascades into attached volumes; every volume deletion
+comes from the exact ownership-filtered volume list.
 After an initial 500 ms daemon-settle interval, cleanup requires two empty
 label-filtered scans separated by another 500 ms. Failure to prove quiescence is
 recorded as retryable cleanup failure.
 
 The startup janitor consumes Issue #6's durable queue:
-`needs_reconciliation = 1 OR cleanup_status IN ('pending', 'failed')`.
+`needs_reconciliation = 1`, cleanup status `pending` or `failed`, or a failed
+sandbox cleanup claim.
 Before any Docker command can create resources, the runner adds a one-shot
-cleanup claim for an existing durable run. Pending or failed claims join the
-same startup queue; successful cleanup closes the claim without permitting a
-second sandbox lifecycle for that run.
+cleanup claim for an eligible non-reconciling durable run. A live pending claim
+stays out of the janitor queue; restart reconciliation activates it after
+process death, while a failed claim enters the queue immediately. Successful
+cleanup closes the claim without permitting a second sandbox lifecycle for
+that run.
 `cleanup_failed` remains queued; `BeginCleanupRetry` moves only cleanup back to
 pending and appends immutable reconciliation evidence. Only
 `cleanup_succeeded` clears reconciliation ownership.

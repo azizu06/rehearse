@@ -2,6 +2,7 @@ package sandbox
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
@@ -62,6 +63,7 @@ type runnerDocker struct {
 	cleanupObserved   bool
 	cleanupContextErr error
 	configCalls       int
+	imageVolumes      []byte
 }
 
 func (docker *runnerDocker) run(ctx context.Context, _ int64, args ...string) ([]byte, error) {
@@ -70,11 +72,26 @@ func (docker *runnerDocker) run(ctx context.Context, _ int64, args ...string) ([
 		if docker.configCalls > 1 {
 			for index := len(args) - 2; index >= 0; index-- {
 				if args[index] == "--file" && strings.HasSuffix(args[index+1], overrideFileName) {
-					return os.ReadFile(args[index+1])
+					data, err := os.ReadFile(args[index+1])
+					if err != nil {
+						return nil, err
+					}
+					var document map[string]any
+					if err := json.Unmarshal(data, &document); err != nil {
+						return nil, err
+					}
+					document["services"].(map[string]any)["worker"].(map[string]any)["image"] = "alpine"
+					return json.Marshal(document)
 				}
 			}
 		}
 		return []byte(`{"services":{"worker":{"image":"alpine"}}}`), nil
+	}
+	if containsSequence(args, "image", "inspect") {
+		if docker.imageVolumes == nil {
+			return []byte("null"), nil
+		}
+		return docker.imageVolumes, nil
 	}
 	if containsSequence(args, "up", "--detach") {
 		docker.upCall = append([]string(nil), args...)
@@ -89,6 +106,22 @@ func (docker *runnerDocker) run(ctx context.Context, _ int64, args ...string) ([
 		docker.cleanupContextErr = ctx.Err()
 	}
 	return nil, nil
+}
+
+func TestRunnerRejectsImagesThatDeclareAnonymousVolumes(t *testing.T) {
+	command := &runnerDocker{imageVolumes: []byte(`{"/var/lib/data":{}}`)}
+	runner := testRunner(t, command, &recordingCleanupJournal{})
+	callbackCalled := false
+	_, err := runner.Run(context.Background(), testRunnerRequest("run-image-volume", time.Minute), func(context.Context, Instance) error {
+		callbackCalled = true
+		return nil
+	})
+	if !errors.Is(err, ErrUnsafeCompose) {
+		t.Fatalf("Run error = %v, want ErrUnsafeCompose", err)
+	}
+	if callbackCalled || command.upCall != nil {
+		t.Fatal("runner started a sandbox for an image declaring anonymous volumes")
+	}
 }
 
 func TestRunnerRemovesSnapshotAndCleansAfterStartBoundaryErrors(t *testing.T) {

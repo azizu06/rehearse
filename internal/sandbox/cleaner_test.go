@@ -57,6 +57,30 @@ func TestCleanerIsIdempotentWhenNoResourcesExist(t *testing.T) {
 	}
 }
 
+func TestCleanerDoesNotCascadeContainerRemovalIntoUnlabeledVolumes(t *testing.T) {
+	identity, _ := newIdentity("run-container-volume-scope")
+	command := &scriptedDocker{lists: map[string][][]byte{
+		"container": {[]byte("owned-container\n"), nil, nil},
+		"network":   {nil, nil, nil},
+		"volume":    {nil, nil, nil},
+	}}
+	cleaner := cleaner{command: command, waiter: &recordingWaiter{}, quiescence: 500 * time.Millisecond}
+	if err := cleaner.cleanup(context.Background(), identity); err != nil {
+		t.Fatalf("cleanup: %v", err)
+	}
+	if !command.calledWith("container", "rm", "--force", "owned-container") {
+		t.Fatal("cleaner did not remove the explicitly enumerated container")
+	}
+	for _, call := range command.calls {
+		if containsSequence(call, "container", "rm") && containsSequence(call, "--volumes") {
+			t.Fatalf("container removal cascaded into attached volumes: %v", call)
+		}
+		if containsSequence(call, "volume", "rm") {
+			t.Fatalf("cleaner removed a volume absent from the ownership-filtered list: %v", call)
+		}
+	}
+}
+
 type scriptedDocker struct {
 	mu    sync.Mutex
 	lists map[string][][]byte

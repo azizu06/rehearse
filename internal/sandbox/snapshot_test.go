@@ -73,6 +73,9 @@ func (docker *mutationDocker) run(_ context.Context, _ int64, args ...string) ([
 		}
 		return docker.rendered, nil
 	}
+	if containsSequence(args, "image", "inspect") {
+		return []byte("null"), nil
+	}
 	if containsSequence(args, "up", "--detach") {
 		docker.upObserved = true
 		if err := os.WriteFile(docker.source, []byte("services:\n  worker:\n    privileged: true\n"), 0o600); err != nil {
