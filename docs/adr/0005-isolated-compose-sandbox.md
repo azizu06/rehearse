@@ -48,12 +48,15 @@ policy; volumes reject external/custom names, driver options, and non-local
 drivers.
 
 The original Compose inputs are rendered with the generated policy into one
-final JSON snapshot. Rehearse validates those exact bytes and `up` receives
-only that snapshot, so it cannot reread the original files or environment
-inputs. Because rendering can interpolate secrets, the snapshot and transient
-policy live in a deterministic Rehearse-owned 0700 directory as 0600 files,
-are never included in command errors, and are removed by both normal cleanup
-and startup reconciliation after a process crash.
+final JSON snapshot. Rehearse resolves each service's selected local platform
+image to an immutable image ID, validates that exact image configuration, and
+rewrites and revalidates the snapshot before `up` receives only those bytes.
+The runner also checks every exact generated container, network, and volume
+name without ownership filters and refuses to adopt any existing object.
+Because rendering can interpolate secrets, the snapshot and transient policy
+live in a deterministic Rehearse-owned 0700 directory as 0600 files, are never
+included in command errors, and are removed by both normal cleanup and startup
+reconciliation after a process crash.
 
 Cleanup lists, inspects, and deletes only resources matching the Rehearse
 managed, project, and full run-fingerprint labels. It uses a fresh bounded

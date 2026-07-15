@@ -301,21 +301,27 @@ func (store *Store) BeginCleanupRetry(ctx context.Context, id string, at time.Ti
 	})
 }
 
-// RunsNeedingReconciliation returns the durable startup janitor queue. Cleanup
-// pending/failed rows remain eligible even if a legacy writer lost the flag.
+// RunsNeedingReconciliation returns the durable startup janitor queue.
 func (store *Store) RunsNeedingReconciliation(ctx context.Context) ([]drill.Run, error) {
 	rows, err := store.database.QueryContext(ctx, `
         SELECT id, plan_id, plan_version, stage, outcome, cleanup_status,
                created_at, updated_at, version, needs_reconciliation,
                reconciliation_requested_at
         FROM runs
-        WHERE needs_reconciliation = 1
-           OR cleanup_status IN ('pending', 'failed')
-           OR EXISTS (
-               SELECT 1 FROM sandbox_cleanup_claims
-               WHERE sandbox_cleanup_claims.run_id = runs.id
-                 AND sandbox_cleanup_claims.status = 'failed'
+        WHERE (
+               needs_reconciliation = 1
+               OR cleanup_status IN ('pending', 'failed')
+               OR EXISTS (
+                   SELECT 1 FROM sandbox_cleanup_claims
+                   WHERE sandbox_cleanup_claims.run_id = runs.id
+                     AND sandbox_cleanup_claims.status = 'failed'
+               )
            )
+          AND NOT EXISTS (
+              SELECT 1 FROM sandbox_cleanup_claims
+              WHERE sandbox_cleanup_claims.run_id = runs.id
+                AND sandbox_cleanup_claims.status = 'pending'
+          )
         ORDER BY id
     `)
 	if err != nil {
@@ -446,6 +452,13 @@ func (store *Store) requireRestartReconciliation(ctx context.Context, at time.Ti
 		return fmt.Errorf("begin restart reconciliation: %w", err)
 	}
 	defer func() { _ = transaction.Rollback() }()
+	if _, err := transaction.ExecContext(ctx, `
+        UPDATE sandbox_cleanup_claims
+        SET status = 'failed', updated_at = ?
+        WHERE status = 'pending'
+    `, formatTime(at)); err != nil {
+		return fmt.Errorf("activate interrupted sandbox cleanup claims: %w", err)
+	}
 
 	rows, err := transaction.QueryContext(ctx, `
         SELECT id, plan_id, plan_version, stage, outcome, cleanup_status,

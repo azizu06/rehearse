@@ -309,6 +309,79 @@ func TestSandboxClaimAndJanitorQueueStayExclusiveAcrossTransition(t *testing.T) 
 	}
 }
 
+func TestSandboxOutcomeCannotEnterJanitorQueueBeforeLiveCleanupCloses(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	now := time.Date(2026, time.July, 15, 18, 45, 0, 0, time.UTC)
+	store, _, run := createPlanAndRun(t, ctx, filepath.Join(t.TempDir(), "rehearse.db"), now)
+	t.Cleanup(func() { _ = store.Close() })
+	if err := store.ClaimSandboxCleanup(ctx, run.ID, now.Add(time.Second)); err != nil {
+		t.Fatalf("ClaimSandboxCleanup: %v", err)
+	}
+
+	start := make(chan struct{})
+	outcomeResult := make(chan error, 1)
+	queueResult := make(chan []drill.Run, 1)
+	queueError := make(chan error, 1)
+	go func() {
+		<-start
+		_, err := store.RecordOutcome(ctx, run.ID, drill.OutcomeFailed, now.Add(2*time.Second))
+		outcomeResult <- err
+	}()
+	go func() {
+		<-start
+		queued, err := store.RunsNeedingReconciliation(ctx)
+		queueResult <- queued
+		queueError <- err
+	}()
+	close(start)
+	if err := <-outcomeResult; err != nil {
+		t.Fatalf("RecordOutcome: %v", err)
+	}
+	if err := <-queueError; err != nil {
+		t.Fatalf("RunsNeedingReconciliation: %v", err)
+	}
+	if queued := <-queueResult; len(queued) != 0 {
+		t.Fatalf("live cleanup claim overlapped the janitor queue: %#v", queued)
+	}
+	queued, err := store.RunsNeedingReconciliation(ctx)
+	if err != nil || len(queued) != 0 {
+		t.Fatalf("outcome with live cleanup claim queue = %#v, error %v", queued, err)
+	}
+	if err := store.RecordSandboxCleanup(ctx, run.ID, drill.CleanupFailed, now.Add(3*time.Second)); err != nil {
+		t.Fatalf("RecordSandboxCleanup(failed): %v", err)
+	}
+	queued, err = store.RunsNeedingReconciliation(ctx)
+	if err != nil || len(queued) != 1 || queued[0].ID != run.ID {
+		t.Fatalf("closed failed cleanup claim queue = %#v, error %v", queued, err)
+	}
+}
+
+func TestInterruptedSandboxClaimEntersJanitorQueueAfterRestart(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	now := time.Date(2026, time.July, 15, 18, 50, 0, 0, time.UTC)
+	path := filepath.Join(t.TempDir(), "rehearse.db")
+	store, _, run := createPlanAndRun(t, ctx, path, now)
+	if err := store.ClaimSandboxCleanup(ctx, run.ID, now.Add(time.Second)); err != nil {
+		t.Fatalf("ClaimSandboxCleanup: %v", err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	reopened, err := journal.Open(ctx, path)
+	if err != nil {
+		t.Fatalf("reopen: %v", err)
+	}
+	t.Cleanup(func() { _ = reopened.Close() })
+	queued, err := reopened.RunsNeedingReconciliation(ctx)
+	if err != nil || len(queued) != 1 || queued[0].ID != run.ID {
+		t.Fatalf("restart queue = %#v, error %v", queued, err)
+	}
+}
+
 func TestSandboxCleanupClaimRejectsJanitorOwnedRuns(t *testing.T) {
 	t.Parallel()
 

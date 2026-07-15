@@ -74,7 +74,7 @@ func (docker *mutationDocker) run(_ context.Context, _ int64, args ...string) ([
 		return docker.rendered, nil
 	}
 	if containsSequence(args, "image", "inspect") {
-		return []byte("null"), nil
+		return []byte(`{"id":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","os":"linux","architecture":"amd64","variant":"","volumes":null}`), nil
 	}
 	if containsSequence(args, "up", "--detach") {
 		docker.upObserved = true
@@ -97,7 +97,11 @@ func (docker *mutationDocker) run(_ context.Context, _ int64, args ...string) ([
 		if err != nil {
 			docker.t.Fatalf("read execution snapshot: %v", err)
 		}
-		if want := escapeSnapshotInterpolation(docker.rendered); !bytes.Equal(actual, want) {
+		want, err := rewriteSnapshotImages(escapeSnapshotInterpolation(docker.rendered), map[string]string{"worker": testImageID})
+		if err != nil {
+			docker.t.Fatalf("build expected pinned snapshot: %v", err)
+		}
+		if !bytes.Equal(actual, want) {
 			docker.t.Fatal("validated and executed snapshot bytes differ")
 		}
 		assertProtectedMode(docker.t, filepath.Dir(snapshotPath), 0o700)

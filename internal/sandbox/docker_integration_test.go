@@ -179,6 +179,39 @@ func TestCleanerDoesNotDeleteUnrelatedDockerResources(t *testing.T) {
 	}
 }
 
+func TestDockerRunnerRejectsAndPreservesUnlabeledExactVolumeCollision(t *testing.T) {
+	requireDockerIntegration(t)
+
+	runID := "integration-exact-volume-collision"
+	projectName := "rehearse-" + fingerprint(runID)[:24]
+	volumeName := projectName + "_work"
+	_ = exec.Command("docker", "volume", "rm", "--force", volumeName).Run()
+	dockerOutput(t, "volume", "create", volumeName)
+	t.Cleanup(func() { _ = exec.Command("docker", "volume", "rm", "--force", volumeName).Run() })
+
+	runner := sandbox.NewDockerRunner(sandbox.DockerRunnerOptions{
+		Binary: "docker", CleanupJournal: newCleanupJournal(t, runID), TemporaryRoot: t.TempDir(), LockRoot: t.TempDir(), CleanupTimeout: 5 * time.Second,
+	})
+	request := sandbox.Request{
+		RunID: runID, ComposeFiles: []string{filepath.Join("testdata", "compose.yaml")},
+		Limits: sandbox.Limits{CPUs: "0.25", MemoryBytes: 32 << 20, PIDs: 16, Duration: 10 * time.Second, OutputBytes: 1 << 20},
+	}
+	_, err := runner.Run(context.Background(), request, func(context.Context, sandbox.Instance) error {
+		t.Fatal("callback ran after an exact-name collision")
+		return nil
+	})
+	if !errors.Is(err, sandbox.ErrProjectCollision) {
+		t.Fatalf("Run error = %v, want ErrProjectCollision", err)
+	}
+	if got := dockerOutput(t, "volume", "ls", "--quiet", "--filter", "name=^"+volumeName+"$"); got == "" {
+		t.Fatal("runner deleted the unrelated exact-name volume")
+	}
+	labels := dockerOutput(t, "volume", "inspect", "--format", `{{json .Labels}}`, volumeName)
+	if strings.Contains(labels, "dev.rehearse") {
+		t.Fatalf("runner adopted the unrelated volume: %s", labels)
+	}
+}
+
 func TestDockerRunnerCleansAfterCancellation(t *testing.T) {
 	requireDockerIntegration(t)
 

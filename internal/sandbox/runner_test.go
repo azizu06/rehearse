@@ -60,11 +60,21 @@ type runnerDocker struct {
 	cancel            context.CancelFunc
 	upErr             error
 	upCall            []string
+	upSnapshotImage   string
 	cleanupObserved   bool
 	cleanupContextErr error
 	configCalls       int
+	platform          string
+	imageID           string
+	retagTo           string
+	imageOS           string
+	imageArchitecture string
+	imageVariant      string
+	imageInspectCall  []string
 	imageVolumes      []byte
 }
+
+const testImageID = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 
 func (docker *runnerDocker) run(ctx context.Context, _ int64, args ...string) ([]byte, error) {
 	if containsSequence(args, "config", "--format", "json") {
@@ -81,20 +91,64 @@ func (docker *runnerDocker) run(ctx context.Context, _ int64, args ...string) ([
 						return nil, err
 					}
 					document["services"].(map[string]any)["worker"].(map[string]any)["image"] = "alpine"
+					if docker.platform != "" {
+						document["services"].(map[string]any)["worker"].(map[string]any)["platform"] = docker.platform
+					}
 					return json.Marshal(document)
 				}
 			}
 		}
-		return []byte(`{"services":{"worker":{"image":"alpine"}}}`), nil
+		service := map[string]any{"image": "alpine"}
+		if docker.platform != "" {
+			service["platform"] = docker.platform
+		}
+		return json.Marshal(map[string]any{"services": map[string]any{"worker": service}})
 	}
 	if containsSequence(args, "image", "inspect") {
-		if docker.imageVolumes == nil {
-			return []byte("null"), nil
+		docker.imageInspectCall = append([]string(nil), args...)
+		imageID := docker.imageID
+		if imageID == "" {
+			imageID = testImageID
 		}
-		return docker.imageVolumes, nil
+		operatingSystem := docker.imageOS
+		if operatingSystem == "" {
+			operatingSystem = "linux"
+		}
+		architecture := docker.imageArchitecture
+		if architecture == "" {
+			architecture = "amd64"
+		}
+		volumes := json.RawMessage("null")
+		if docker.imageVolumes != nil {
+			volumes = docker.imageVolumes
+		}
+		output, err := json.Marshal(struct {
+			ID           string          `json:"id"`
+			OS           string          `json:"os"`
+			Architecture string          `json:"architecture"`
+			Variant      string          `json:"variant"`
+			Volumes      json.RawMessage `json:"volumes"`
+		}{imageID, operatingSystem, architecture, docker.imageVariant, volumes})
+		if docker.retagTo != "" {
+			docker.imageID = docker.retagTo
+		}
+		return output, err
 	}
 	if containsSequence(args, "up", "--detach") {
 		docker.upCall = append([]string(nil), args...)
+		data, err := os.ReadFile(lastFileArgument(args))
+		if err != nil {
+			return nil, err
+		}
+		var snapshot struct {
+			Services map[string]struct {
+				Image string `json:"image"`
+			} `json:"services"`
+		}
+		if err := json.Unmarshal(data, &snapshot); err != nil {
+			return nil, err
+		}
+		docker.upSnapshotImage = snapshot.Services["worker"].Image
 		if docker.cancel != nil {
 			docker.cancel()
 			return nil, context.Canceled
@@ -106,6 +160,39 @@ func (docker *runnerDocker) run(ctx context.Context, _ int64, args ...string) ([
 		docker.cleanupContextErr = ctx.Err()
 	}
 	return nil, nil
+}
+
+func TestRunnerPinsSelectedPlatformImageBeforeMutableTagChanges(t *testing.T) {
+	retaggedID := "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+	command := &runnerDocker{
+		platform: "linux/arm64/v8", imageID: testImageID, retagTo: retaggedID,
+		imageArchitecture: "arm64", imageVariant: "v8",
+	}
+	runner := testRunner(t, command, &recordingCleanupJournal{})
+	if _, err := runner.Run(context.Background(), testRunnerRequest("run-pinned-platform", time.Minute), func(context.Context, Instance) error { return nil }); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if got := command.upSnapshotImage; got != testImageID {
+		t.Fatalf("execution snapshot image = %q, want immutable selected ID %q", got, testImageID)
+	}
+	if command.imageID != retaggedID {
+		t.Fatalf("mutable tag did not change during preflight: %q", command.imageID)
+	}
+	if !containsSequence(command.imageInspectCall, "--platform", "linux/arm64/v8") {
+		t.Fatalf("image inspection ignored selected platform: %v", command.imageInspectCall)
+	}
+}
+
+func TestRunnerRejectsSelectedImagePlatformMismatch(t *testing.T) {
+	command := &runnerDocker{platform: "linux/arm64", imageArchitecture: "amd64"}
+	runner := testRunner(t, command, &recordingCleanupJournal{})
+	_, err := runner.Run(context.Background(), testRunnerRequest("run-platform-mismatch", time.Minute), func(context.Context, Instance) error { return nil })
+	if !errors.Is(err, ErrUnsafeCompose) {
+		t.Fatalf("Run error = %v, want ErrUnsafeCompose", err)
+	}
+	if command.upCall != nil {
+		t.Fatal("runner started a sandbox with mismatched selected image metadata")
+	}
 }
 
 func TestRunnerRejectsImagesThatDeclareAnonymousVolumes(t *testing.T) {

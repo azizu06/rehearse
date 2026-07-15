@@ -2,14 +2,11 @@ package sandbox
 
 import (
 	"bytes"
-	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"os"
-	"path"
-	"sort"
 	"strconv"
 	"strings"
 )
@@ -375,59 +372,6 @@ func parseAndValidateComposeMode(data []byte, identity identity, enforced *Limit
 		}
 	}
 	return model, nil
-}
-
-func validateImageVolumeDeclarations(ctx context.Context, command dockerCommand, model composeModel) error {
-	serviceNames := make([]string, 0, len(model.Services))
-	for name := range model.Services {
-		serviceNames = append(serviceNames, name)
-	}
-	sort.Strings(serviceNames)
-	for _, name := range serviceNames {
-		image := model.Services[name].Image
-		if image == "" {
-			return unsafeService(name, "a local image reference is required")
-		}
-		output, err := command.run(ctx, dockerMetadataOutputLimit,
-			"image", "inspect", "--format", `{{json .Config.Volumes}}`, image,
-		)
-		if err != nil {
-			return fmt.Errorf("inspect service %q image volume declarations: %w", name, err)
-		}
-		trimmed := bytes.TrimSpace(output)
-		if bytes.Equal(trimmed, []byte("null")) {
-			continue
-		}
-		var volumes map[string]json.RawMessage
-		if len(trimmed) == 0 || json.Unmarshal(trimmed, &volumes) != nil {
-			return unsafeService(name, "image volume metadata is invalid")
-		}
-		for target := range volumes {
-			if !serviceMountCoversTarget(model.Services[name], target) {
-				return unsafeService(name, "image declares an anonymous volume target without an attributable mount")
-			}
-		}
-	}
-	return nil
-}
-
-func serviceMountCoversTarget(service composeService, target string) bool {
-	if target == "" {
-		return false
-	}
-	want := path.Clean(target)
-	for _, mount := range service.Volumes {
-		if mount.Target == "" {
-			continue
-		}
-		if path.Clean(mount.Target) != want {
-			continue
-		}
-		if mount.Type == "tmpfs" || (mount.Type == "volume" && mount.Source != "") {
-			return true
-		}
-	}
-	return false
 }
 
 func validateResources(kind string, resources map[string]composeResource, projectName string, network bool) error {
