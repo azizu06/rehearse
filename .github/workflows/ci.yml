@@ -70,6 +70,17 @@ jobs:
         run: npm --prefix web exec -- playwright install chromium
       - run: make test-browser
 
+  probe-integration:
+    name: Probe integration (PostgreSQL)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: false
+      - run: make test-integration
+
   static-security:
     runs-on: ubuntu-latest
     steps:

@@ -42,7 +42,7 @@ The core runtime does **not** require RabbitMQ or PostgreSQL. An optional queued
 - **v1.0 — resume-ready product:** the full source/target adapter matrix, safety hardening, CI mode, AWS/Terraform proof, external onboarding, and release audit.
 - **Later:** Kubernetes runner, Windows, native RDS/Supabase/MongoDB adapters, and team tenancy.
 
-See [PRD.md](PRD.md), [CONTEXT.md](CONTEXT.md), and the [architecture decisions](docs/adr/) for the committed scope. Work is tracked in [GitHub Issues](https://github.com/azizu06/rehearse/issues) and the public [Rehearse delivery board](https://github.com/users/azizu06/projects/4).
+See [PRD.md](PRD.md), [CONTEXT.md](CONTEXT.md), the [architecture decisions](docs/adr/), and the [probe/evidence contract](docs/probes-and-evidence.md) for the committed scope. Work is tracked in [GitHub Issues](https://github.com/azizu06/rehearse/issues) and the public [Rehearse delivery board](https://github.com/users/azizu06/projects/4).
 
 ## Engineering standards
 
@@ -56,6 +56,7 @@ The tracer-bullet toolchain requires the Go version declared in `go.mod` and Nod
 npm --prefix web ci
 make test
 make test-race
+make test-integration
 make lint
 make static
 make build

@@ -6,7 +6,7 @@ TRIVY ?= trivy
 TRIVY_VERSION := 0.72.0
 VERSION ?= dev
 
-.PHONY: build e2e-server lint security static test test-browser test-race trivy web-build
+.PHONY: build e2e-server lint security static test test-browser test-integration test-race trivy web-build
 
 test:
 	go test ./...
@@ -14,6 +14,9 @@ test:
 
 test-race:
 	go test -race ./...
+
+test-integration:
+	go test -tags=integration ./internal/probe -run TestPostgreSQLProbeEnforcesReadOnlySingleStatementAndLeastPrivilege -count=1
 
 lint:
 	go vet ./...

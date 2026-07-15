@@ -8,6 +8,8 @@ import (
 	"regexp"
 	"strings"
 	"time"
+
+	"github.com/azizu06/rehearse/internal/probe"
 )
 
 // ErrInvalidPlan identifies a plan that cannot safely enter the journal.
@@ -36,6 +38,7 @@ type PlanSpec struct {
 	SourceKind           string                `json:"source_kind"`
 	TargetKind           string                `json:"target_kind"`
 	CredentialReferences []CredentialReference `json:"credential_references,omitempty"`
+	ProbeConfig          probe.Config          `json:"probe_config,omitempty"`
 }
 
 // Plan is one immutable version of a drill definition.
@@ -73,6 +76,11 @@ func (plan Plan) Validate() error {
 	for index, reference := range plan.Spec.CredentialReferences {
 		if err := reference.validate(); err != nil {
 			return fmt.Errorf("%w: credential reference %d: %v", ErrInvalidPlan, index, err)
+		}
+	}
+	if !plan.Spec.ProbeConfig.IsZero() {
+		if err := plan.Spec.ProbeConfig.Validate(); err != nil {
+			return fmt.Errorf("%w: probe config: %v", ErrInvalidPlan, err)
 		}
 	}
 	return nil

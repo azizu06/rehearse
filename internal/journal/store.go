@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/azizu06/rehearse/internal/drill"
+	"github.com/azizu06/rehearse/internal/probe"
 	_ "modernc.org/sqlite"
 )
 
@@ -89,6 +90,14 @@ func (store *Store) CreatePlan(ctx context.Context, plan drill.Plan) error {
 	if err != nil {
 		return fmt.Errorf("encode credential references: %w", err)
 	}
+	probeConfig := ""
+	if !plan.Spec.ProbeConfig.IsZero() {
+		encoded, err := plan.Spec.ProbeConfig.CanonicalJSON()
+		if err != nil {
+			return fmt.Errorf("encode probe config: %w", err)
+		}
+		probeConfig = string(encoded)
+	}
 
 	transaction, err := store.database.BeginTx(ctx, nil)
 	if err != nil {
@@ -115,13 +124,14 @@ func (store *Store) CreatePlan(ctx context.Context, plan drill.Plan) error {
 	if _, err := transaction.ExecContext(
 		ctx,
 		`INSERT INTO plan_versions(
-            plan_id, version, source_kind, target_kind, credential_references, created_at
-        ) VALUES (?, ?, ?, ?, ?, ?)`,
+			plan_id, version, source_kind, target_kind, credential_references, probe_config, created_at
+		) VALUES (?, ?, ?, ?, ?, ?, ?)`,
 		plan.ID,
 		plan.Version,
 		plan.Spec.SourceKind,
 		plan.Spec.TargetKind,
 		string(references),
+		probeConfig,
 		formatTime(plan.CreatedAt),
 	); err != nil {
 		return fmt.Errorf("insert plan version: %w", err)
@@ -135,14 +145,16 @@ func (store *Store) CreatePlan(ctx context.Context, plan drill.Plan) error {
 // Plan loads one immutable plan version.
 func (store *Store) Plan(ctx context.Context, id string, version int64) (drill.Plan, error) {
 	var (
-		plan       drill.Plan
-		references string
-		createdAt  string
+		plan        drill.Plan
+		references  string
+		probeConfig string
+		createdAt   string
 	)
 	err := store.database.QueryRowContext(ctx, `
         SELECT plans.id, plans.name, plan_versions.version,
                plan_versions.source_kind, plan_versions.target_kind,
-               plan_versions.credential_references, plan_versions.created_at
+			   plan_versions.credential_references, plan_versions.probe_config,
+			   plan_versions.created_at
         FROM plans
         JOIN plan_versions ON plan_versions.plan_id = plans.id
         WHERE plans.id = ? AND plan_versions.version = ?
@@ -153,6 +165,7 @@ func (store *Store) Plan(ctx context.Context, id string, version int64) (drill.P
 		&plan.Spec.SourceKind,
 		&plan.Spec.TargetKind,
 		&references,
+		&probeConfig,
 		&createdAt,
 	)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -163,6 +176,12 @@ func (store *Store) Plan(ctx context.Context, id string, version int64) (drill.P
 	}
 	if err := json.Unmarshal([]byte(references), &plan.Spec.CredentialReferences); err != nil {
 		return drill.Plan{}, fmt.Errorf("decode credential references: %w", err)
+	}
+	if probeConfig != "" {
+		plan.Spec.ProbeConfig, err = probe.ParseConfigBytes([]byte(probeConfig))
+		if err != nil {
+			return drill.Plan{}, fmt.Errorf("decode probe config: %w", err)
+		}
 	}
 	plan.CreatedAt, err = parseTime(createdAt)
 	if err != nil {
