@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/azizu06/rehearse/internal/drill"
+	"github.com/azizu06/rehearse/internal/sandboxid"
 	_ "modernc.org/sqlite"
 )
 
@@ -26,7 +27,7 @@ var (
 	// ErrSandboxResourceClaimed identifies a duplicate expected sandbox resource.
 	ErrSandboxResourceClaimed = errors.New("sandbox cleanup resource already claimed")
 	// ErrCorruptSandboxClaim identifies unsafe durable cleanup ownership state.
-	ErrCorruptSandboxClaim = errors.New("corrupt sandbox cleanup ownership requires manual intervention")
+	ErrCorruptSandboxClaim = sandboxid.ErrCorruptManifest
 	// ErrJournalOwned identifies a journal already held by another live runtime.
 	ErrJournalOwned = errors.New("journal is already owned by another runtime")
 )
@@ -253,7 +254,7 @@ func (store *Store) ClaimSandboxCleanup(ctx context.Context, id, claimID string,
 
 // AppendSandboxCleanupResource durably records one expected resource before creation.
 func (store *Store) AppendSandboxCleanupResource(ctx context.Context, id, claimID string, resource drill.SandboxResourceClaim, at time.Time) error {
-	if at.IsZero() || !validSandboxClaimID(claimID) || !validSandboxResourceClaim(resource) {
+	if at.IsZero() || !validSandboxClaimID(claimID) || !validSandboxClaimID(resource.Generation) {
 		return drill.ErrInvalidRun
 	}
 	transaction, err := store.database.BeginTx(ctx, nil)
@@ -278,6 +279,9 @@ func (store *Store) AppendSandboxCleanupResource(ctx context.Context, id, claimI
 	}
 	if storedClaimID != claimID || status != "pending" {
 		return ErrSandboxClaimed
+	}
+	if !validSandboxResourceClaim(id, resource) {
+		return ErrCorruptSandboxClaim
 	}
 	if _, err := transaction.ExecContext(ctx, `
 		INSERT INTO sandbox_cleanup_resources(
@@ -332,7 +336,7 @@ func (store *Store) SandboxCleanupClaim(ctx context.Context, id string) (string,
 		if err := rows.Scan(&resource.Kind, &resource.Name, &resource.Generation); err != nil {
 			return "", nil, false, fmt.Errorf("scan sandbox cleanup manifest: %w", err)
 		}
-		if !validSandboxResourceClaim(resource) {
+		if !validSandboxResourceClaim(id, resource) {
 			return "", nil, false, ErrCorruptSandboxClaim
 		}
 		resources = append(resources, resource)
@@ -355,11 +359,8 @@ func validSandboxClaimID(claimID string) bool {
 	return err == nil && len(decoded) == 32 && claimID == strings.ToLower(claimID)
 }
 
-func validSandboxResourceClaim(resource drill.SandboxResourceClaim) bool {
-	if resource.Kind != "container" && resource.Kind != "network" && resource.Kind != "volume" {
-		return false
-	}
-	return len(resource.Name) > 0 && len(resource.Name) <= 255 && validSandboxClaimID(resource.Generation)
+func validSandboxResourceClaim(runID string, resource drill.SandboxResourceClaim) bool {
+	return validSandboxClaimID(resource.Generation) && sandboxid.ValidateResourceName(runID, resource.Kind, resource.Name) == nil
 }
 
 // RecordSandboxCleanup closes or preserves the durable sandbox cleanup claim.

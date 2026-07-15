@@ -131,7 +131,7 @@ func TestCleanerWaitsForAndRemovesDelayedResources(t *testing.T) {
 	claimID := strings.Repeat("c", 64)
 	generation := strings.Repeat("e", 64)
 	projectName := "rehearse-" + runFingerprint[:24]
-	volumeName := "rehearse-delayed-" + runFingerprint[:12]
+	volumeName := projectName + "_delayed"
 	_ = exec.Command("docker", "volume", "rm", "--force", volumeName).Run()
 	t.Cleanup(func() { _ = exec.Command("docker", "volume", "rm", "--force", volumeName).Run() })
 	created := make(chan struct{})

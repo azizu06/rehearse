@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/azizu06/rehearse/internal/drill"
+	"github.com/azizu06/rehearse/internal/sandboxid"
 )
 
 const (
@@ -70,11 +71,8 @@ func (cleaner *Cleaner) Cleanup(ctx context.Context, runID, claimID string, reso
 		return err
 	}
 	for _, resource := range resources {
-		if resource.Kind != "container" && resource.Kind != "network" && resource.Kind != "volume" {
-			return fmt.Errorf("%w: invalid sandbox cleanup resource kind", ErrInvalidRequest)
-		}
-		if resource.Name == "" {
-			return fmt.Errorf("%w: empty sandbox cleanup resource name", ErrInvalidRequest)
+		if sandboxid.ValidateResourceName(runID, resource.Kind, resource.Name) != nil {
+			return ErrCorruptSandboxClaim
 		}
 		if _, err := resourceLabels(identity, resource.Generation); err != nil {
 			return err

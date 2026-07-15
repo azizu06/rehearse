@@ -9,6 +9,8 @@ import (
 	"os"
 	"strconv"
 	"strings"
+
+	"github.com/azizu06/rehearse/internal/sandboxid"
 )
 
 const maxComposeResources = 64
@@ -383,8 +385,12 @@ func validateResources(kind string, resources map[string]composeResource, projec
 		if err := validateComposeKey(kind, name); err != nil {
 			return err
 		}
+		expectedName, err := sandboxid.ResourceName(projectName, kind, name)
+		if err != nil {
+			return fmt.Errorf("%w: invalid generated %s name", ErrUnsafeCompose, kind)
+		}
 		if reserved {
-			if !resource.External || resource.Name != projectName+"_"+name || resource.Attachable || resource.Driver != "" || len(resource.DriverOpts) != 0 || resource.EnableIPv4 != nil || resource.EnableIPv6 != nil || rawSet(resource.IPAM) || resource.Internal || len(resource.Labels) != 0 {
+			if !resource.External || resource.Name != expectedName || resource.Attachable || resource.Driver != "" || len(resource.DriverOpts) != 0 || resource.EnableIPv4 != nil || resource.EnableIPv6 != nil || rawSet(resource.IPAM) || resource.Internal || len(resource.Labels) != 0 {
 				return fmt.Errorf("%w: reserved %s %q must be an exact external name-only reference", ErrUnsafeCompose, kind, name)
 			}
 			continue
@@ -392,7 +398,7 @@ func validateResources(kind string, resources map[string]composeResource, projec
 		if resource.External {
 			return fmt.Errorf("%w: external %s %q is not allowed", ErrUnsafeCompose, kind, name)
 		}
-		if resource.Name != "" && resource.Name != projectName+"_"+name {
+		if resource.Name != "" && resource.Name != expectedName {
 			return fmt.Errorf("%w: custom %s name %q is not allowed", ErrUnsafeCompose, kind, resource.Name)
 		}
 		if len(resource.DriverOpts) > 0 {
@@ -496,7 +502,7 @@ func stringMapEqual(actual, expected map[string]string) bool {
 }
 
 func validateComposeKey(kind, name string) error {
-	if len(name) > maxComposeKeyLength || !composeKeyPattern.MatchString(name) {
+	if !sandboxid.ValidResourceKey(name) {
 		return fmt.Errorf("%w: %s key %q must be lowercase alphanumeric/dash and at most %d characters", ErrUnsafeCompose, kind, name, maxComposeKeyLength)
 	}
 	return nil

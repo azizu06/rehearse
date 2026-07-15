@@ -63,6 +63,20 @@ func TestCleanerIsIdempotentWhenNoResourcesExist(t *testing.T) {
 	}
 }
 
+func TestCleanerRejectsForeignManifestNameBeforeDocker(t *testing.T) {
+	identity := claimedTestIdentity(t, "run-cleaner-manifest-validation")
+	foreign := claimedTestIdentity(t, "another-cleaner-run")
+	command := &scriptedDocker{}
+	cleaner := &Cleaner{cleaner: cleaner{command: command}}
+	manifest := []drill.SandboxResourceClaim{{Kind: "volume", Name: foreign.projectName + "_work", Generation: testResourceGeneration}}
+	if err := cleaner.Cleanup(context.Background(), identity.runID, identity.claimID, manifest); !errors.Is(err, ErrCorruptSandboxClaim) {
+		t.Fatalf("Cleanup error = %v, want ErrCorruptSandboxClaim", err)
+	}
+	if len(command.calls) != 0 {
+		t.Fatalf("Cleaner executed Docker for corrupt manifest: %#v", command.calls)
+	}
+}
+
 func TestStartupCleanupTreatsPreCreateManifestEntryAsAbsent(t *testing.T) {
 	identity := claimedTestIdentity(t, "run-pre-create-crash")
 	command := &runnerDocker{resources: make(map[string]inspectedResource)}

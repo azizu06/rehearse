@@ -18,6 +18,7 @@ import (
 	"github.com/azizu06/rehearse/internal/drill"
 	"github.com/azizu06/rehearse/internal/journal"
 	"github.com/azizu06/rehearse/internal/sandbox"
+	"github.com/azizu06/rehearse/internal/sandboxid"
 )
 
 const testSandboxClaimID = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
@@ -366,7 +367,7 @@ func TestSandboxCleanupClaimRequiresOneDurableRunAndQueuesFailures(t *testing.T)
 	if len(resources) != 0 {
 		t.Fatalf("initial sandbox cleanup manifest = %#v, want empty", resources)
 	}
-	resource := drill.SandboxResourceClaim{Kind: "volume", Name: "rehearse-work", Generation: strings.Repeat("c", 64)}
+	resource := drill.SandboxResourceClaim{Kind: "volume", Name: sandboxResourceName(t, run.ID, "volume", "work"), Generation: strings.Repeat("c", 64)}
 	if err := store.AppendSandboxCleanupResource(ctx, run.ID, testSandboxClaimID, resource, now.Add(2*time.Second)); err != nil {
 		t.Fatalf("AppendSandboxCleanupResource: %v", err)
 	}
@@ -411,17 +412,83 @@ func TestSandboxCleanupClaimRequiresOneDurableRunAndQueuesFailures(t *testing.T)
 	}
 }
 
+func TestAppendSandboxCleanupResourceBindsNamesToDurableRun(t *testing.T) {
+	ctx := context.Background()
+	now := time.Date(2026, time.July, 15, 18, 10, 0, 0, time.UTC)
+	store, _, run := createPlanAndRun(t, ctx, filepath.Join(t.TempDir(), "rehearse.db"), now)
+	t.Cleanup(func() { _ = store.Close() })
+	if err := store.ClaimSandboxCleanup(ctx, run.ID, testSandboxClaimID, now.Add(time.Second)); err != nil {
+		t.Fatalf("ClaimSandboxCleanup: %v", err)
+	}
+	projectName, _, err := sandboxid.Project(run.ID)
+	if err != nil {
+		t.Fatalf("sandbox project identity: %v", err)
+	}
+	otherProject, _, err := sandboxid.Project("another-durable-run")
+	if err != nil {
+		t.Fatalf("other sandbox project identity: %v", err)
+	}
+	testCases := []struct {
+		name     string
+		kind     string
+		resource string
+	}{
+		{name: "container from another run", kind: "container", resource: otherProject + "-worker-1"},
+		{name: "container alternate separators", kind: "container", resource: projectName + "_worker_1"},
+		{name: "container unexpected replica", kind: "container", resource: projectName + "-worker-2"},
+		{name: "network alternate separator", kind: "network", resource: projectName + "-default"},
+		{name: "network control byte", kind: "network", resource: projectName + "_bad\x00name"},
+		{name: "volume traversal", kind: "volume", resource: projectName + "_../work"},
+		{name: "volume from another run", kind: "volume", resource: otherProject + "_work"},
+		{name: "volume oversized key", kind: "volume", resource: projectName + "_" + strings.Repeat("a", 27)},
+		{name: "unknown kind", kind: "secret", resource: projectName + "_work"},
+	}
+	for _, testCase := range testCases {
+		t.Run(testCase.name, func(t *testing.T) {
+			resource := drill.SandboxResourceClaim{Kind: testCase.kind, Name: testCase.resource, Generation: strings.Repeat("d", 64)}
+			if err := store.AppendSandboxCleanupResource(ctx, run.ID, testSandboxClaimID, resource, now.Add(2*time.Second)); !errors.Is(err, journal.ErrCorruptSandboxClaim) {
+				t.Fatalf("AppendSandboxCleanupResource error = %v, want ErrCorruptSandboxClaim", err)
+			}
+		})
+	}
+	for _, resource := range []drill.SandboxResourceClaim{
+		{Kind: "container", Name: sandboxResourceName(t, run.ID, "container", "worker"), Generation: strings.Repeat("1", 64)},
+		{Kind: "network", Name: sandboxResourceName(t, run.ID, "network", "default"), Generation: strings.Repeat("2", 64)},
+		{Kind: "volume", Name: sandboxResourceName(t, run.ID, "volume", "work"), Generation: strings.Repeat("3", 64)},
+	} {
+		if err := store.AppendSandboxCleanupResource(ctx, run.ID, testSandboxClaimID, resource, now.Add(3*time.Second)); err != nil {
+			t.Fatalf("append valid %s resource: %v", resource.Kind, err)
+		}
+	}
+}
+
 func TestCorruptSandboxClaimFailsClosedAndRemainsRetryable(t *testing.T) {
 	testCases := []struct {
-		name       string
-		claimID    string
-		resource   bool
-		generation string
+		name         string
+		claimID      string
+		resource     bool
+		kind         string
+		resourceName func(*testing.T, string) string
+		generation   string
 	}{
 		{name: "legacy empty", claimID: ""},
 		{name: "malformed", claimID: "not-a-claim"},
-		{name: "legacy empty manifest generation", claimID: testSandboxClaimID, resource: true, generation: ""},
-		{name: "malformed manifest generation", claimID: testSandboxClaimID, resource: true, generation: "not-a-generation"},
+		{name: "legacy empty manifest generation", claimID: testSandboxClaimID, resource: true, kind: "volume", resourceName: validInjectedResourceName("volume", "work"), generation: ""},
+		{name: "malformed manifest generation", claimID: testSandboxClaimID, resource: true, kind: "volume", resourceName: validInjectedResourceName("volume", "work"), generation: "not-a-generation"},
+		{name: "container unexpected replica", claimID: testSandboxClaimID, resource: true, kind: "container", resourceName: func(t *testing.T, runID string) string {
+			return strings.TrimSuffix(sandboxResourceName(t, runID, "container", "worker"), "-1") + "-2"
+		}, generation: strings.Repeat("4", 64)},
+		{name: "network from another run", claimID: testSandboxClaimID, resource: true, kind: "network", resourceName: func(t *testing.T, _ string) string {
+			return sandboxResourceName(t, "another-durable-run", "network", "default")
+		}, generation: strings.Repeat("5", 64)},
+		{name: "volume traversal", claimID: testSandboxClaimID, resource: true, kind: "volume", resourceName: func(t *testing.T, runID string) string {
+			projectName, _, err := sandboxid.Project(runID)
+			if err != nil {
+				t.Fatalf("sandbox project identity: %v", err)
+			}
+			return projectName + "_../work"
+		}, generation: strings.Repeat("6", 64)},
+		{name: "unknown resource kind", claimID: testSandboxClaimID, resource: true, kind: "secret", resourceName: validInjectedResourceName("volume", "work"), generation: strings.Repeat("7", 64)},
 	}
 	for _, testCase := range testCases {
 		t.Run(testCase.name, func(t *testing.T) {
@@ -444,10 +511,11 @@ func TestCorruptSandboxClaimFailsClosedAndRemainsRetryable(t *testing.T) {
 				t.Fatalf("inject corrupt sandbox claim: %v", err)
 			}
 			if testCase.resource {
+				resourceName := testCase.resourceName(t, run.ID)
 				if _, err := database.ExecContext(ctx, `
 					INSERT INTO sandbox_cleanup_resources(run_id, claim_id, kind, name, generation_id, expected_at)
-					VALUES (?, ?, 'volume', 'rehearse-corrupt', ?, ?)
-				`, run.ID, testCase.claimID, testCase.generation, now.Format(time.RFC3339Nano)); err != nil {
+					VALUES (?, ?, ?, ?, ?, ?)
+				`, run.ID, testCase.claimID, testCase.kind, resourceName, testCase.generation, now.Format(time.RFC3339Nano)); err != nil {
 					t.Fatalf("inject corrupt sandbox manifest: %v", err)
 				}
 			}
@@ -896,6 +964,25 @@ func createPlanAndRun(t *testing.T, ctx context.Context, path string, now time.T
 		t.Fatalf("CreateRun: %v", err)
 	}
 	return store, plan, run
+}
+
+func sandboxResourceName(t *testing.T, runID, kind, key string) string {
+	t.Helper()
+	projectName, _, err := sandboxid.Project(runID)
+	if err != nil {
+		t.Fatalf("sandbox project identity: %v", err)
+	}
+	name, err := sandboxid.ResourceName(projectName, kind, key)
+	if err != nil {
+		t.Fatalf("sandbox resource name: %v", err)
+	}
+	return name
+}
+
+func validInjectedResourceName(kind, key string) func(*testing.T, string) string {
+	return func(t *testing.T, runID string) string {
+		return sandboxResourceName(t, runID, kind, key)
+	}
 }
 
 func testPlan(now time.Time) drill.Plan {

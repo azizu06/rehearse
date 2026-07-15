@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/azizu06/rehearse/internal/drill"
+	"github.com/azizu06/rehearse/internal/sandboxid"
 )
 
 const (
@@ -27,10 +28,8 @@ const (
 	runIDLabel              = "dev.rehearse.run-id"
 	sandboxClaimLabel       = "dev.rehearse.sandbox-claim"
 	resourceGenerationLabel = "dev.rehearse.resource-generation"
-	projectPrefix           = "rehearse-"
-	projectDigestLength     = 24
 	sandboxClaimBytes       = 32
-	maxComposeKeyLength     = 26
+	maxComposeKeyLength     = sandboxid.MaxResourceKeyLength
 )
 
 var (
@@ -40,8 +39,7 @@ var (
 	ErrProjectBusy         = errors.New("sandbox project is already locked")
 	ErrProjectCollision    = errors.New("sandbox project fingerprint collision")
 	ErrProjectExists       = errors.New("sandbox project resources already exist")
-	runIDPattern           = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$`)
-	composeKeyPattern      = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,25}$`)
+	ErrCorruptSandboxClaim = sandboxid.ErrCorruptManifest
 	dnsLabelPattern        = regexp.MustCompile(`^[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?$`)
 )
 
@@ -114,14 +112,14 @@ func newIdentity(runID string) (identity, error) {
 }
 
 func newIdentityWithDigest(runID string, digest [sha256.Size]byte) (identity, error) {
-	if !runIDPattern.MatchString(runID) {
-		return identity{}, fmt.Errorf("%w: run ID must match %s", ErrInvalidRequest, runIDPattern)
+	projectName, fingerprint, err := sandboxid.ProjectFromDigest(runID, digest)
+	if err != nil {
+		return identity{}, fmt.Errorf("%w: %v", ErrInvalidRequest, err)
 	}
-	fingerprint := fmt.Sprintf("%x", digest)
 	return identity{
 		runID:       runID,
 		fingerprint: fingerprint,
-		projectName: projectPrefix + fingerprint[:projectDigestLength],
+		projectName: projectName,
 	}, nil
 }
 

@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/azizu06/rehearse/internal/drill"
+	"github.com/azizu06/rehearse/internal/sandboxid"
 )
 
 type createdResource struct {
@@ -81,7 +82,11 @@ func reserveComposeResources(
 	ledger *createdResourceLedger,
 	newGeneration func() (string, error),
 ) error {
-	for _, resource := range resolvedResourceNames(identity, model) {
+	resources, err := resolvedResourceNames(identity, model)
+	if err != nil {
+		return err
+	}
+	for _, resource := range resources {
 		if resource.kind != "network" && resource.kind != "volume" {
 			continue
 		}
@@ -168,7 +173,11 @@ func inspectResourceReference(ctx context.Context, command dockerCommand, kind, 
 }
 
 func captureComposeContainers(ctx context.Context, command dockerCommand, identity identity, model composeModel, ledger *createdResourceLedger, requireAll bool) error {
-	for _, resource := range resolvedResourceNames(identity, model) {
+	resources, err := resolvedResourceNames(identity, model)
+	if err != nil {
+		return err
+	}
+	for _, resource := range resources {
 		if resource.kind != "container" {
 			continue
 		}
@@ -233,7 +242,11 @@ func prepareComposeContainerClaims(
 	sort.Strings(serviceNames)
 	generations := make(map[string]string, len(serviceNames))
 	for _, serviceName := range serviceNames {
-		resource := resourceDescriptor("container", identity.projectName+"-"+serviceName+"-1")
+		resourceName, err := sandboxid.ResourceName(identity.projectName, "container", serviceName)
+		if err != nil {
+			return nil, err
+		}
+		resource := resourceDescriptor("container", resourceName)
 		generation, err := newGeneration()
 		if err != nil {
 			return nil, err
@@ -301,8 +314,16 @@ func rewriteSnapshotReservedResources(data []byte, identity identity, model comp
 			break
 		}
 	}
-	document["networks"] = encodeReservedResourceReferences(identity, networks)
-	document["volumes"] = encodeReservedResourceReferences(identity, model.Volumes)
+	networkReferences, err := encodeReservedResourceReferences(identity, "network", networks)
+	if err != nil {
+		return nil, err
+	}
+	document["networks"] = networkReferences
+	volumeReferences, err := encodeReservedResourceReferences(identity, "volume", model.Volumes)
+	if err != nil {
+		return nil, err
+	}
+	document["volumes"] = volumeReferences
 
 	rewritten, err := json.Marshal(document)
 	if err != nil {
@@ -311,14 +332,18 @@ func rewriteSnapshotReservedResources(data []byte, identity identity, model comp
 	return rewritten, nil
 }
 
-func encodeReservedResourceReferences(identity identity, resources map[string]composeResource) json.RawMessage {
+func encodeReservedResourceReferences(identity identity, kind string, resources map[string]composeResource) (json.RawMessage, error) {
 	references := make(map[string]map[string]any, len(resources))
 	for name, resource := range resources {
+		resourceName, err := resolvedComposeResourceName(identity, kind, name, resource)
+		if err != nil {
+			return nil, err
+		}
 		references[name] = map[string]any{
 			"external": true,
-			"name":     resolvedComposeResourceName(identity, name, resource),
+			"name":     resourceName,
 		}
 	}
 	data, _ := json.Marshal(references)
-	return data
+	return data, nil
 }

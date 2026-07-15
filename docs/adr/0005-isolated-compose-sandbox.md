@@ -70,7 +70,10 @@ Before any Docker creation, the runner durably records a cryptographically
 random sandbox claim ID; the identifier is not secret. Before each individual
 creation, it also durably appends the expected resource type, exact name, and a
 cryptographically random generation ID to that claim's manifest. The generation
-is included in the resource labels. Stable run labels remain attribution
+is included in the resource labels. Manifest names must parse as the exact
+run-derived Compose name for a constrained service, network, or volume key;
+alternate separators, replicas, suffixes, and foreign project names fail closed.
+Stable run labels remain attribution
 metadata and are never sufficient deletion authority. Live cleanup keeps an
 invocation-local ledger containing only successfully created and immediately
 verified resource type, name, daemon identity where available, and full labels.

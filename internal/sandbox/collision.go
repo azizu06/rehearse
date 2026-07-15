@@ -6,6 +6,8 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+
+	"github.com/azizu06/rehearse/internal/sandboxid"
 )
 
 const dockerMetadataOutputLimit = 4 << 20
@@ -47,7 +49,10 @@ func ensureProjectVacant(ctx context.Context, command dockerCommand, identity id
 }
 
 func ensureResolvedProjectVacant(ctx context.Context, command dockerCommand, identity identity, model composeModel) error {
-	resources := resolvedResourceNames(identity, model)
+	resources, err := resolvedResourceNames(identity, model)
+	if err != nil {
+		return err
+	}
 	for _, resource := range resources {
 		ids, err := findExactResourceIDs(ctx, command, resource)
 		if err != nil {
@@ -112,10 +117,14 @@ func resourceDescriptor(kind, name string) resolvedResourceName {
 	}
 }
 
-func resolvedResourceNames(identity identity, model composeModel) []resolvedResourceName {
+func resolvedResourceNames(identity identity, model composeModel) ([]resolvedResourceName, error) {
 	resources := make([]resolvedResourceName, 0, len(model.Services)+len(model.Networks)+len(model.Volumes)+1)
 	for name := range model.Services {
-		resources = append(resources, resourceDescriptor("container", identity.projectName+"-"+name+"-1"))
+		resourceName, err := sandboxid.ResourceName(identity.projectName, "container", name)
+		if err != nil {
+			return nil, fmt.Errorf("resolve Compose container name: %w", err)
+		}
+		resources = append(resources, resourceDescriptor("container", resourceName))
 	}
 	networks := make(map[string]composeResource, len(model.Networks)+1)
 	for name, network := range model.Networks {
@@ -124,16 +133,28 @@ func resolvedResourceNames(identity identity, model composeModel) []resolvedReso
 	for _, service := range model.Services {
 		if service.NetworkMode != "none" && len(service.Networks) == 0 {
 			if _, exists := networks["default"]; !exists {
-				networks["default"] = composeResource{Name: identity.projectName + "_default"}
+				resourceName, err := sandboxid.ResourceName(identity.projectName, "network", "default")
+				if err != nil {
+					return nil, fmt.Errorf("resolve default Compose network name: %w", err)
+				}
+				networks["default"] = composeResource{Name: resourceName}
 			}
 			break
 		}
 	}
 	for name, network := range networks {
-		resources = append(resources, resourceDescriptor("network", resolvedComposeResourceName(identity, name, network)))
+		resourceName, err := resolvedComposeResourceName(identity, "network", name, network)
+		if err != nil {
+			return nil, err
+		}
+		resources = append(resources, resourceDescriptor("network", resourceName))
 	}
 	for name, volume := range model.Volumes {
-		resources = append(resources, resourceDescriptor("volume", resolvedComposeResourceName(identity, name, volume)))
+		resourceName, err := resolvedComposeResourceName(identity, "volume", name, volume)
+		if err != nil {
+			return nil, err
+		}
+		resources = append(resources, resourceDescriptor("volume", resourceName))
 	}
 	sort.Slice(resources, func(left, right int) bool {
 		if resources[left].kind == resources[right].kind {
@@ -141,14 +162,18 @@ func resolvedResourceNames(identity identity, model composeModel) []resolvedReso
 		}
 		return resources[left].kind < resources[right].kind
 	})
-	return resources
+	return resources, nil
 }
 
-func resolvedComposeResourceName(identity identity, name string, resource composeResource) string {
-	if resource.Name != "" {
-		return resource.Name
+func resolvedComposeResourceName(identity identity, kind, key string, resource composeResource) (string, error) {
+	expected, err := sandboxid.ResourceName(identity.projectName, kind, key)
+	if err != nil {
+		return "", fmt.Errorf("resolve Compose %s name: %w", kind, err)
 	}
-	return identity.projectName + "_" + name
+	if resource.Name != "" && resource.Name != expected {
+		return "", fmt.Errorf("%w: Compose %s name does not match its generated identity", ErrUnsafeCompose, kind)
+	}
+	return expected, nil
 }
 
 func ownershipFilters(identity identity, includeFingerprint bool) []string {
