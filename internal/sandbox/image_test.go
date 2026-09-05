@@ -169,6 +169,49 @@ func TestInspectLocalImageFallsBackWhenPlatformFlagIsUnavailable(t *testing.T) {
 	}
 }
 
+func TestInspectLocalImageOmitsUnrequestedVariantForDocker28Compatibility(t *testing.T) {
+	inspector := &recordingImageInspector{results: []imageInspectResult{
+		{output: []byte(testScalarImageMetadata)},
+		{output: []byte(`null`)},
+	}}
+	if _, err := inspectLocalImage(context.Background(), inspector, "worker", composeService{
+		Image: "registry.example/worker:latest", Platform: "linux/amd64",
+	}); err != nil {
+		t.Fatalf("inspectLocalImage: %v", err)
+	}
+	if format := argumentAfter(inspector.calls[0], "--format"); strings.Contains(format, ".Variant") {
+		t.Fatalf("identity template queried an unrequested variant: %q", format)
+	}
+}
+
+func TestInspectLocalImageReadsRequestedVariant(t *testing.T) {
+	inspector := &recordingImageInspector{results: []imageInspectResult{
+		{output: []byte(`{"id":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","os":"linux","architecture":"arm64","variant":"v8"}`)},
+		{output: []byte(`null`)},
+	}}
+	if _, err := inspectLocalImage(context.Background(), inspector, "worker", composeService{
+		Image: "registry.example/worker:latest", Platform: "linux/arm64/v8",
+	}); err != nil {
+		t.Fatalf("inspectLocalImage: %v", err)
+	}
+	if format := argumentAfter(inspector.calls[0], "--format"); !strings.Contains(format, ".Variant") {
+		t.Fatalf("identity template omitted the requested variant: %q", format)
+	}
+}
+
+func TestInspectLocalImageRejectsTrailingSlashPlatformBeforeDockerCommand(t *testing.T) {
+	inspector := &recordingImageInspector{}
+	_, err := inspectLocalImage(context.Background(), inspector, "worker", composeService{
+		Image: "registry.example/worker:latest", Platform: "linux/amd64/",
+	})
+	if !errors.Is(err, ErrUnsafeCompose) {
+		t.Fatalf("inspectLocalImage error = %v, want ErrUnsafeCompose", err)
+	}
+	if len(inspector.calls) != 0 {
+		t.Fatalf("malformed platform reached Docker: %#v", inspector.calls)
+	}
+}
+
 func assertImageVolumeCall(t *testing.T, call []string, wantTemplate string) {
 	t.Helper()
 	if got, want := len(call), 5; got != want {

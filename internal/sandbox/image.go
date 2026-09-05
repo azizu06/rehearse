@@ -11,7 +11,8 @@ import (
 )
 
 const (
-	imageIdentityFormat        = `{"id":{{json .Id}},"os":{{json .Os}},"architecture":{{json .Architecture}},"variant":{{json .Variant}}}`
+	imageIdentityFormat        = `{"id":{{json .Id}},"os":{{json .Os}},"architecture":{{json .Architecture}},"variant":""}`
+	imageIdentityVariantFormat = `{"id":{{json .Id}},"os":{{json .Os}},"architecture":{{json .Architecture}},"variant":{{json .Variant}}}`
 	imageVolumesFormat         = `{{json .Config.Volumes}}`
 	imageVolumesFallbackFormat = `{{json (index .Config "Volumes")}}`
 )
@@ -53,6 +54,9 @@ func inspectLocalImage(ctx context.Context, command dockerCommand, name string, 
 	if service.Image == "" {
 		return localImageMetadata{}, unsafeService(name, "a local image reference is required")
 	}
+	if err := validateImagePlatformSyntax(service.Platform); err != nil {
+		return localImageMetadata{}, unsafeService(name, err.Error())
+	}
 	output, err := inspectLocalImageIdentity(ctx, command, service.Image, service.Platform)
 	if err != nil && service.Platform != "" {
 		output, err = inspectLocalImageIdentity(ctx, command, service.Image, "")
@@ -83,7 +87,12 @@ func inspectLocalImageIdentity(ctx context.Context, command dockerCommand, refer
 	if platform != "" {
 		args = append(args, "--platform", platform)
 	}
-	args = append(args, "--format", imageIdentityFormat, reference)
+	format := imageIdentityFormat
+	parts := strings.Split(strings.ToLower(platform), "/")
+	if len(parts) == 3 && parts[2] != "" {
+		format = imageIdentityVariantFormat
+	}
+	args = append(args, "--format", format, reference)
 	return command.run(ctx, dockerMetadataOutputLimit, args...)
 }
 
@@ -107,18 +116,29 @@ func inspectLocalImageVolumes(ctx context.Context, command dockerCommand, immuta
 }
 
 func validateImagePlatform(platform string, metadata localImageMetadata) error {
+	if err := validateImagePlatformSyntax(platform); err != nil {
+		return err
+	}
 	if platform == "" {
 		return nil
 	}
 	parts := strings.Split(strings.ToLower(platform), "/")
-	if len(parts) < 2 || len(parts) > 3 || parts[0] == "" || parts[1] == "" {
-		return fmt.Errorf("selected image platform is invalid")
-	}
 	if strings.ToLower(metadata.OS) != parts[0] || strings.ToLower(metadata.Architecture) != parts[1] {
 		return fmt.Errorf("selected image platform does not match the requested platform")
 	}
 	if len(parts) == 3 && strings.ToLower(metadata.Variant) != parts[2] {
 		return fmt.Errorf("selected image variant does not match the requested platform")
+	}
+	return nil
+}
+
+func validateImagePlatformSyntax(platform string) error {
+	if platform == "" {
+		return nil
+	}
+	parts := strings.Split(strings.ToLower(platform), "/")
+	if len(parts) < 2 || len(parts) > 3 || parts[0] == "" || parts[1] == "" || (len(parts) == 3 && parts[2] == "") {
+		return fmt.Errorf("selected image platform is invalid")
 	}
 	return nil
 }
