@@ -129,11 +129,17 @@ func New(config Config, resolver source.CredentialResolver) (*Adapter, error) {
 	}
 	credentialTempDir := config.CredentialTempDir
 	if credentialTempDir == "" {
-		credentialTempDir = os.TempDir()
+		var err error
+		credentialTempDir, err = filepath.Abs(os.TempDir())
+		if err != nil {
+			return nil, &source.Failure{Kind: source.FailureUnavailable, Operation: "configure", SafeHint: "credential temp directory is unavailable"}
+		}
+		credentialTempDir = filepath.Clean(credentialTempDir)
 	}
 	if config.Repository.Kind == RepositoryLocal && pathInsideOrSame(credentialTempDir, config.Repository.Location) {
 		return nil, &source.Failure{Kind: source.FailureInvalidInput, Operation: "configure", SafeHint: "credential temp directory must be outside the local restic repository"}
 	}
+	config.CredentialTempDir = credentialTempDir
 	if config.MaxStdoutBytes == 0 {
 		config.MaxStdoutBytes = defaultMaxStdoutBytes
 	}
@@ -428,9 +434,6 @@ func (adapter *Adapter) withCredentialEnvironment(
 	use func([]string) error,
 ) (returnErr error) {
 	parent := adapter.config.CredentialTempDir
-	if parent == "" {
-		parent = os.TempDir()
-	}
 	directory, err := os.MkdirTemp(parent, "rehearse-restic-credentials-")
 	if err != nil {
 		return &source.Failure{Kind: source.FailureUnavailable, Operation: operation, SafeHint: "temporary credential storage is unavailable"}

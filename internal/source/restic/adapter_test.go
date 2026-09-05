@@ -36,6 +36,35 @@ func (ctx *observedDoneContext) Done() <-chan struct{} {
 	return ctx.done
 }
 
+func TestDefaultCredentialTempDirIsFrozenAtConstruction(t *testing.T) {
+	initialTempDir := t.TempDir()
+	repository := t.TempDir()
+	t.Setenv("TMPDIR", initialTempDir)
+
+	adapter := newTestAdapter(t, resticadapter.Config{
+		Binary: writeFakeResticScript(t, `
+case " $* " in
+  *" version "*) printf '%s\n' '{"message_type":"version","version":"0.19.1"}' ;;
+  *" snapshots "*)
+    case "$RESTIC_PASSWORD_FILE" in
+      `+shellQuote(initialTempDir)+`/*) printf '%s\n' '[]' ;;
+      *) exit 91 ;;
+    esac
+    ;;
+esac
+`),
+		Repository: resticadapter.Repository{Kind: resticadapter.RepositoryLocal, Location: repository},
+		Password:   drill.CredentialReference{Provider: drill.CredentialEnvironment, Locator: "REHEARSE_TEST_RESTIC_PASSWORD"},
+	})
+
+	t.Setenv("TMPDIR", repository)
+	if _, err := adapter.ListRecoveryPoints(context.Background()); err != nil {
+		t.Fatalf("list with mutated TMPDIR: %v", err)
+	}
+	assertDirectoryEmpty(t, initialTempDir)
+	assertDirectoryEmpty(t, repository)
+}
+
 func TestListMapsStructuredExitErrorsWithoutLeakingOutput(t *testing.T) {
 	t.Parallel()
 
@@ -485,7 +514,6 @@ printf '%s\n' '{"message_type":"summary","Message_Type":"future","files_restored
 func TestAcquireRejectsInvalidOrMissingSummaryBeforePromotion(t *testing.T) {
 	t.Parallel()
 
-	const recoveryPointID = "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"
 	tests := []struct {
 		name    string
 		summary string
@@ -509,42 +537,12 @@ func TestAcquireRejectsInvalidOrMissingSummaryBeforePromotion(t *testing.T) {
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			t.Parallel()
-
-			workspace := t.TempDir()
-			credentialTempDir := t.TempDir()
-			binary := writeFakeResticScript(t, `
-target=""
-while test "$#" -gt 0; do
-  if test "$1" = "--target"; then target="$2"; shift; fi
-  shift
-done
-mkdir -p "$target/private"
-printf 'partial-private-content' > "$target/private/item"
-printf '%s\n' '`+test.summary+`'
-`)
-			adapter := newTestAdapter(t, resticadapter.Config{
-				Binary:            binary,
-				Repository:        resticadapter.Repository{Kind: resticadapter.RepositoryLocal, Location: t.TempDir()},
-				Password:          drill.CredentialReference{Provider: drill.CredentialEnvironment, Locator: "REHEARSE_TEST_RESTIC_PASSWORD"},
-				CredentialTempDir: credentialTempDir,
-			})
-
-			_, err := adapter.Acquire(context.Background(), source.AcquireRequest{
-				RecoveryPointID: recoveryPointID,
-				Workspace:       workspace,
-			})
-			var failure *source.Failure
-			if !errors.As(err, &failure) || failure.Kind != source.FailureCorruptOutput {
-				t.Fatalf("failure = %+v, want corrupt output", failure)
-			}
-			assertDirectoryEmpty(t, workspace)
-			assertDirectoryEmpty(t, credentialTempDir)
+			assertCorruptAcquireOutput(t, "printf '%s\\n' "+shellQuote(test.summary), "")
 		})
 	}
 }
 
 func TestAcquireRejectsKnownMessagesAfterSummary(t *testing.T) {
-	const recoveryPointID = "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"
 	tests := []struct {
 		name     string
 		output   string
@@ -578,33 +576,7 @@ printf '%s\n' '{"message_type":"status","message_type":"future"}'`,
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			workspace := t.TempDir()
-			credentialTempDir := t.TempDir()
-			adapter := newTestAdapter(t, resticadapter.Config{
-				Binary: writeFakeResticScript(t, `
-target=""
-while test "$#" -gt 0; do
-  if test "$1" = "--target"; then target="$2"; shift; fi
-  shift
-done
-printf 'partial-private-content' > "$target/item"
-`+test.output+`
-`),
-				Repository:        resticadapter.Repository{Kind: resticadapter.RepositoryLocal, Location: t.TempDir()},
-				Password:          drill.CredentialReference{Provider: drill.CredentialEnvironment, Locator: "REHEARSE_TEST_RESTIC_PASSWORD"},
-				CredentialTempDir: credentialTempDir,
-			})
-
-			_, err := adapter.Acquire(context.Background(), source.AcquireRequest{
-				RecoveryPointID: recoveryPointID,
-				Workspace:       workspace,
-			})
-			var failure *source.Failure
-			if !errors.As(err, &failure) || failure.Kind != source.FailureCorruptOutput || failure.SafeHint != test.safeHint {
-				t.Fatalf("failure = %+v, want corrupt output with hint %q", failure, test.safeHint)
-			}
-			assertDirectoryEmpty(t, workspace)
-			assertDirectoryEmpty(t, credentialTempDir)
+			assertCorruptAcquireOutput(t, test.output, test.safeHint)
 		})
 	}
 }
@@ -612,7 +584,6 @@ printf 'partial-private-content' > "$target/item"
 func TestAcquireRejectsInvalidStatusBeforePromotion(t *testing.T) {
 	t.Parallel()
 
-	const recoveryPointID = "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"
 	tests := []struct {
 		name   string
 		status string
@@ -634,37 +605,7 @@ func TestAcquireRejectsInvalidStatusBeforePromotion(t *testing.T) {
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			t.Parallel()
-
-			workspace := t.TempDir()
-			credentialTempDir := t.TempDir()
-			binary := writeFakeResticScript(t, `
-target=""
-while test "$#" -gt 0; do
-  if test "$1" = "--target"; then target="$2"; shift; fi
-  shift
-done
-mkdir -p "$target/private"
-printf 'partial-private-content' > "$target/private/item"
-printf '%s\n' '`+test.status+`'
-printf '%s\n' '{"message_type":"summary"}'
-`)
-			adapter := newTestAdapter(t, resticadapter.Config{
-				Binary:            binary,
-				Repository:        resticadapter.Repository{Kind: resticadapter.RepositoryLocal, Location: t.TempDir()},
-				Password:          drill.CredentialReference{Provider: drill.CredentialEnvironment, Locator: "REHEARSE_TEST_RESTIC_PASSWORD"},
-				CredentialTempDir: credentialTempDir,
-			})
-
-			_, err := adapter.Acquire(context.Background(), source.AcquireRequest{
-				RecoveryPointID: recoveryPointID,
-				Workspace:       workspace,
-			})
-			var failure *source.Failure
-			if !errors.As(err, &failure) || failure.Kind != source.FailureCorruptOutput {
-				t.Fatalf("failure = %+v, want corrupt output", failure)
-			}
-			assertDirectoryEmpty(t, workspace)
-			assertDirectoryEmpty(t, credentialTempDir)
+			assertCorruptAcquireOutput(t, "printf '%s\\n' "+shellQuote(test.status)+"\nprintf '%s\\n' '{\"message_type\":\"summary\"}'", "")
 		})
 	}
 }
@@ -672,7 +613,6 @@ printf '%s\n' '{"message_type":"summary"}'
 func TestAcquireRejectsInvalidMessageTypeBeforePromotion(t *testing.T) {
 	t.Parallel()
 
-	const recoveryPointID = "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"
 	tests := []struct {
 		name    string
 		message string
@@ -688,10 +628,19 @@ func TestAcquireRejectsInvalidMessageTypeBeforePromotion(t *testing.T) {
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			t.Parallel()
+			assertCorruptAcquireOutput(t, "printf '%s\\n' "+shellQuote(test.message)+"\nprintf '%s\\n' '{\"message_type\":\"summary\"}'", "")
+		})
+	}
+}
 
-			workspace := t.TempDir()
-			credentialTempDir := t.TempDir()
-			binary := writeFakeResticScript(t, `
+func assertCorruptAcquireOutput(t *testing.T, processOutput string, safeHint string) {
+	t.Helper()
+
+	const recoveryPointID = "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"
+	workspace := t.TempDir()
+	credentialTempDir := t.TempDir()
+	adapter := newTestAdapter(t, resticadapter.Config{
+		Binary: writeFakeResticScript(t, `
 target=""
 while test "$#" -gt 0; do
   if test "$1" = "--target"; then target="$2"; shift; fi
@@ -699,28 +648,26 @@ while test "$#" -gt 0; do
 done
 mkdir -p "$target/private"
 printf 'partial-private-content' > "$target/private/item"
-printf '%s\n' '`+test.message+`'
-printf '%s\n' '{"message_type":"summary"}'
-`)
-			adapter := newTestAdapter(t, resticadapter.Config{
-				Binary:            binary,
-				Repository:        resticadapter.Repository{Kind: resticadapter.RepositoryLocal, Location: t.TempDir()},
-				Password:          drill.CredentialReference{Provider: drill.CredentialEnvironment, Locator: "REHEARSE_TEST_RESTIC_PASSWORD"},
-				CredentialTempDir: credentialTempDir,
-			})
+`+processOutput+`
+`),
+		Repository:        resticadapter.Repository{Kind: resticadapter.RepositoryLocal, Location: t.TempDir()},
+		Password:          drill.CredentialReference{Provider: drill.CredentialEnvironment, Locator: "REHEARSE_TEST_RESTIC_PASSWORD"},
+		CredentialTempDir: credentialTempDir,
+	})
 
-			_, err := adapter.Acquire(context.Background(), source.AcquireRequest{
-				RecoveryPointID: recoveryPointID,
-				Workspace:       workspace,
-			})
-			var failure *source.Failure
-			if !errors.As(err, &failure) || failure.Kind != source.FailureCorruptOutput {
-				t.Fatalf("failure = %+v, want corrupt output", failure)
-			}
-			assertDirectoryEmpty(t, workspace)
-			assertDirectoryEmpty(t, credentialTempDir)
-		})
+	_, err := adapter.Acquire(context.Background(), source.AcquireRequest{
+		RecoveryPointID: recoveryPointID,
+		Workspace:       workspace,
+	})
+	var failure *source.Failure
+	if !errors.As(err, &failure) || failure.Kind != source.FailureCorruptOutput {
+		t.Fatalf("failure = %+v, want corrupt output", failure)
 	}
+	if safeHint != "" && failure.SafeHint != safeHint {
+		t.Fatalf("safe hint = %q, want %q", failure.SafeHint, safeHint)
+	}
+	assertDirectoryEmpty(t, workspace)
+	assertDirectoryEmpty(t, credentialTempDir)
 }
 
 func TestAcquirePromotesEmptyRestoreWithOmittedZeroCounters(t *testing.T) {
