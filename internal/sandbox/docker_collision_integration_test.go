@@ -2,6 +2,7 @@ package sandbox
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"os"
 	"os/exec"
@@ -13,6 +14,8 @@ import (
 	"github.com/azizu06/rehearse/internal/drill"
 )
 
+const internalDockerTestOwnerLabel = "com.azizu06.rehearse-test-owner"
+
 func TestRealDockerLateStableCollisionPreservesCollisionAndCleansReservation(t *testing.T) {
 	if os.Getenv("REHEARSE_DOCKER_INTEGRATION") != "1" {
 		t.Skip("set REHEARSE_DOCKER_INTEGRATION=1 to run real Docker tests")
@@ -21,19 +24,17 @@ func TestRealDockerLateStableCollisionPreservesCollisionAndCleansReservation(t *
 		t.Skipf("Docker is unavailable: %v", err)
 	}
 
-	runID := "integration-late-stable-collision"
+	runID := uniqueInternalDockerRunID(t, "integration-late-stable-collision")
 	stable, _ := newIdentity(runID)
 	volumeName := stable.projectName + "_work"
 	networkName := stable.projectName + "_default"
-	_ = exec.Command("docker", "volume", "rm", "--force", volumeName).Run()
-	_ = exec.Command("docker", "network", "rm", networkName).Run()
-	t.Cleanup(func() {
-		_ = exec.Command("docker", "volume", "rm", "--force", volumeName).Run()
-		_ = exec.Command("docker", "network", "rm", networkName).Run()
-	})
+	registerOwnedDockerCleanup(t, "volume", volumeName, map[string]string{internalDockerTestOwnerLabel: runID})
+	claimed, _ := stable.withClaimID(testClaimID)
+	networkLabels, _ := resourceLabels(claimed, strings.Repeat("0", 63)+"1")
+	registerOwnedDockerCleanup(t, "network", networkName, networkLabels)
 
 	root := t.TempDir()
-	command := &lateCollisionRealDocker{delegate: newCommandExecutor("docker")}
+	command := &lateCollisionRealDocker{delegate: newCommandExecutor("docker"), testOwner: runID}
 	runner := &DockerRunner{
 		command: command,
 		cleaner: cleaner{command: command, waiter: timerWaiter{}, quiescence: cleanupQuiescence, snapshotRoot: root},
@@ -69,13 +70,15 @@ func TestRealDockerLiveCleanupPreservesDaemonIdentityReplacement(t *testing.T) {
 		t.Skipf("Docker is unavailable: %v", err)
 	}
 
-	identity, _ := newIdentity("integration-daemon-replacement")
+	identity, _ := newIdentity(uniqueInternalDockerRunID(t, "integration-daemon-replacement"))
 	identity, _ = identity.withClaimID(testClaimID)
 	name := identity.projectName + "_replacement"
-	_ = exec.Command("docker", "network", "rm", name).Run()
-	t.Cleanup(func() { _ = exec.Command("docker", "network", "rm", name).Run() })
 	originalGeneration := strings.Repeat("4", 64)
 	replacementGeneration := strings.Repeat("5", 64)
+	originalLabels, _ := resourceLabels(identity, originalGeneration)
+	replacementLabels, _ := resourceLabels(identity, replacementGeneration)
+	registerOwnedDockerCleanup(t, "network", name, originalLabels)
+	registerOwnedDockerCleanup(t, "network", name, replacementLabels)
 	create := func(generation string) string {
 		args := []string{"network", "create", "--driver", "bridge", "--internal"}
 		labels, _ := resourceLabels(identity, generation)
@@ -93,9 +96,7 @@ func TestRealDockerLiveCleanupPreservesDaemonIdentityReplacement(t *testing.T) {
 		return strings.TrimSpace(string(output))
 	}
 	originalID := create(originalGeneration)
-	if output, err := exec.Command("docker", "network", "rm", originalID).CombinedOutput(); err != nil {
-		t.Fatalf("remove original network: %v\n%s", err, output)
-	}
+	removeOwnedDockerResource(t, "network", name, originalLabels, true)
 	replacementID := create(replacementGeneration)
 	if replacementID == originalID {
 		t.Fatalf("replacement reused daemon ID %q", replacementID)
@@ -124,11 +125,9 @@ func TestRealDockerLiveCleanupPreservesRapidVolumeGenerationReplacement(t *testi
 		t.Skipf("Docker is unavailable: %v", err)
 	}
 
-	identity, _ := newIdentity("integration-volume-generation-replacement")
+	identity, _ := newIdentity(uniqueInternalDockerRunID(t, "integration-volume-generation-replacement"))
 	identity, _ = identity.withClaimID(testClaimID)
 	name := identity.projectName + "_replacement"
-	_ = exec.Command("docker", "volume", "rm", "--force", name).Run()
-	t.Cleanup(func() { _ = exec.Command("docker", "volume", "rm", "--force", name).Run() })
 	create := func(generation string) {
 		args := []string{"volume", "create", "--driver", "local"}
 		labels, _ := resourceLabels(identity, generation)
@@ -142,10 +141,12 @@ func TestRealDockerLiveCleanupPreservesRapidVolumeGenerationReplacement(t *testi
 	}
 	originalGeneration := strings.Repeat("6", 64)
 	replacementGeneration := strings.Repeat("7", 64)
+	originalLabels, _ := resourceLabels(identity, originalGeneration)
+	replacementLabels, _ := resourceLabels(identity, replacementGeneration)
+	registerOwnedDockerCleanup(t, "volume", name, originalLabels)
+	registerOwnedDockerCleanup(t, "volume", name, replacementLabels)
 	create(originalGeneration)
-	if output, err := exec.Command("docker", "volume", "rm", "--force", name).CombinedOutput(); err != nil {
-		t.Fatalf("remove original volume: %v\n%s", err, output)
-	}
+	removeOwnedDockerResource(t, "volume", name, originalLabels, true)
 	create(replacementGeneration)
 
 	ledger := newCreatedResourceLedger()
@@ -172,8 +173,9 @@ func TestRealDockerLiveCleanupPreservesRapidVolumeGenerationReplacement(t *testi
 }
 
 type lateCollisionRealDocker struct {
-	delegate dockerCommand
-	injected bool
+	delegate  dockerCommand
+	injected  bool
+	testOwner string
 }
 
 func (docker *lateCollisionRealDocker) run(ctx context.Context, limit int64, args ...string) ([]byte, error) {
@@ -190,9 +192,54 @@ func (docker *lateCollisionRealDocker) run(ctx context.Context, limit int64, arg
 			}
 			stableArgs = append(stableArgs, args[index])
 		}
+		stableArgs = append(stableArgs[:len(stableArgs)-1], "--label", internalDockerTestOwnerLabel+"="+docker.testOwner, stableArgs[len(stableArgs)-1])
 		if _, err := docker.delegate.run(ctx, limit, stableArgs...); err != nil {
 			return nil, err
 		}
 	}
 	return docker.delegate.run(ctx, limit, args...)
+}
+
+func uniqueInternalDockerRunID(t *testing.T, prefix string) string {
+	t.Helper()
+	value, err := generateClaimID()
+	if err != nil {
+		t.Fatalf("generate unique Docker run ID: %v", err)
+	}
+	return prefix + "-" + value[:16]
+}
+
+func registerOwnedDockerCleanup(t *testing.T, kind, name string, expected map[string]string) {
+	t.Helper()
+	t.Cleanup(func() { removeOwnedDockerResource(t, kind, name, expected, false) })
+}
+
+func removeOwnedDockerResource(t *testing.T, kind, name string, expected map[string]string, required bool) {
+	t.Helper()
+	output, err := exec.Command("docker", kind, "inspect", "--format", `{{json .Labels}}`, name).CombinedOutput()
+	if err != nil {
+		if required {
+			t.Fatalf("inspect owned test %s %q: %v\n%s", kind, name, err, output)
+		}
+		return
+	}
+	var labels map[string]string
+	if err := json.Unmarshal([]byte(strings.TrimSpace(string(output))), &labels); err != nil {
+		t.Fatalf("decode owned test %s %q labels: %v", kind, name, err)
+	}
+	for key, value := range expected {
+		if labels[key] != value {
+			if required {
+				t.Fatalf("refusing to remove %s %q with %s=%q, want %q", kind, name, key, labels[key], value)
+			}
+			return
+		}
+	}
+	remove := []string{kind, "rm", name}
+	if kind == "volume" {
+		remove = []string{kind, "rm", "--force", name}
+	}
+	if output, err := exec.Command("docker", remove...).CombinedOutput(); err != nil {
+		t.Fatalf("remove owned test %s %q: %v\n%s", kind, name, err, output)
+	}
 }

@@ -19,6 +19,8 @@ import (
 	"github.com/azizu06/rehearse/internal/sandbox"
 )
 
+const dockerTestOwnerLabel = "com.azizu06.rehearse-test-owner"
+
 func TestDockerRunnerAppliesIsolationLabelsAndResourceLimits(t *testing.T) {
 	requireDockerIntegration(t)
 
@@ -126,15 +128,14 @@ func TestDockerRunnerAppliesIsolationLabelsAndResourceLimits(t *testing.T) {
 func TestCleanerWaitsForAndRemovesDelayedResources(t *testing.T) {
 	requireDockerIntegration(t)
 
-	runID := "integration-delayed-cleanup"
+	runID := uniqueDockerRunID(t, "integration-delayed-cleanup")
 	runFingerprint := fingerprint(runID)
 	claimID := strings.Repeat("c", 64)
 	generation := strings.Repeat("e", 64)
 	projectName := "rehearse-" + runFingerprint[:24]
 	volumeName := projectName + "_delayed"
-	_ = exec.Command("docker", "volume", "rm", "--force", volumeName).Run()
-	t.Cleanup(func() { _ = exec.Command("docker", "volume", "rm", "--force", volumeName).Run() })
-	created := make(chan struct{})
+	registerDockerTestCleanup(t, "volume", volumeName, runID)
+	created := make(chan error, 1)
 	go func() {
 		time.Sleep(200 * time.Millisecond)
 		command := exec.Command("docker", "volume", "create",
@@ -144,10 +145,10 @@ func TestCleanerWaitsForAndRemovesDelayedResources(t *testing.T) {
 			"--label", "dev.rehearse.run-id="+runID,
 			"--label", "dev.rehearse.sandbox-claim="+claimID,
 			"--label", "dev.rehearse.resource-generation="+generation,
+			"--label", dockerTestOwnerLabel+"="+runID,
 			volumeName,
 		)
-		_ = command.Run()
-		close(created)
+		created <- command.Run()
 	}()
 
 	cleaner := sandbox.NewCleaner(sandbox.CleanerOptions{Binary: "docker"})
@@ -158,7 +159,9 @@ func TestCleanerWaitsForAndRemovesDelayedResources(t *testing.T) {
 	if err := cleaner.Cleanup(ctx, runID, claimID, manifest); err != nil {
 		t.Fatalf("Cleanup: %v", err)
 	}
-	<-created
+	if err := <-created; err != nil {
+		t.Fatalf("create delayed volume: %v", err)
+	}
 	if elapsed := time.Since(started); elapsed < time.Second {
 		t.Fatalf("cleanup returned after %s; want separated empty scans with 500ms quiescence", elapsed)
 	}
@@ -170,9 +173,10 @@ func TestCleanerWaitsForAndRemovesDelayedResources(t *testing.T) {
 func TestCleanerDoesNotDeleteUnrelatedDockerResources(t *testing.T) {
 	requireDockerIntegration(t)
 
-	name := "rehearse-unrelated-" + fingerprint(t.Name())[:12]
-	dockerOutput(t, "volume", "create", name)
-	t.Cleanup(func() { _ = exec.Command("docker", "volume", "rm", "--force", name).Run() })
+	owner := uniqueDockerRunID(t, "integration-unrelated")
+	name := "rehearse-unrelated-" + fingerprint(owner)[:12]
+	dockerOutput(t, "volume", "create", "--label", dockerTestOwnerLabel+"="+owner, name)
+	registerDockerTestCleanup(t, "volume", name, owner)
 
 	cleaner := sandbox.NewCleaner(sandbox.CleanerOptions{Binary: "docker"})
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
@@ -188,11 +192,10 @@ func TestCleanerDoesNotDeleteUnrelatedDockerResources(t *testing.T) {
 func TestRealDockerStartupCleanupHandlesPreCreateCrashWindow(t *testing.T) {
 	requireDockerIntegration(t)
 
-	runID := "integration-pre-create-crash"
+	runID := uniqueDockerRunID(t, "integration-pre-create-crash")
 	claimID := strings.Repeat("8", 64)
 	generation := strings.Repeat("9", 64)
 	name := "rehearse-" + fingerprint(runID)[:24] + "_work"
-	_ = exec.Command("docker", "volume", "rm", "--force", name).Run()
 
 	cleaner := sandbox.NewCleaner(sandbox.CleanerOptions{Binary: "docker", LockRoot: t.TempDir()})
 	manifest := []drill.SandboxResourceClaim{{Kind: "volume", Name: name, Generation: generation}}
@@ -209,12 +212,11 @@ func TestRealDockerStartupCleanupHandlesPreCreateCrashWindow(t *testing.T) {
 func TestDockerRunnerRejectsAndPreservesUnlabeledExactVolumeCollision(t *testing.T) {
 	requireDockerIntegration(t)
 
-	runID := "integration-exact-volume-collision"
+	runID := uniqueDockerRunID(t, "integration-exact-volume-collision")
 	projectName := "rehearse-" + fingerprint(runID)[:24]
 	volumeName := projectName + "_work"
-	_ = exec.Command("docker", "volume", "rm", "--force", volumeName).Run()
-	dockerOutput(t, "volume", "create", volumeName)
-	t.Cleanup(func() { _ = exec.Command("docker", "volume", "rm", "--force", volumeName).Run() })
+	dockerOutput(t, "volume", "create", "--label", dockerTestOwnerLabel+"="+runID, volumeName)
+	registerDockerTestCleanup(t, "volume", volumeName, runID)
 
 	runner := sandbox.NewDockerRunner(sandbox.DockerRunnerOptions{
 		Binary: "docker", CleanupJournal: newCleanupJournal(t, runID), TemporaryRoot: t.TempDir(), LockRoot: t.TempDir(), CleanupTimeout: 5 * time.Second,
@@ -242,19 +244,19 @@ func TestDockerRunnerRejectsAndPreservesUnlabeledExactVolumeCollision(t *testing
 func TestDockerRunnerPreservesExactStableLabelVolumeCollision(t *testing.T) {
 	requireDockerIntegration(t)
 
-	runID := "integration-stable-label-collision"
+	runID := uniqueDockerRunID(t, "integration-stable-label-collision")
 	runFingerprint := fingerprint(runID)
 	projectName := "rehearse-" + runFingerprint[:24]
 	volumeName := projectName + "_work"
-	_ = exec.Command("docker", "volume", "rm", "--force", volumeName).Run()
 	dockerOutput(t, "volume", "create",
 		"--label", "dev.rehearse.managed=true",
 		"--label", "dev.rehearse.run-fingerprint="+runFingerprint,
 		"--label", "dev.rehearse.project="+projectName,
 		"--label", "dev.rehearse.run-id="+runID,
+		"--label", dockerTestOwnerLabel+"="+runID,
 		volumeName,
 	)
-	t.Cleanup(func() { _ = exec.Command("docker", "volume", "rm", "--force", volumeName).Run() })
+	registerDockerTestCleanup(t, "volume", volumeName, runID)
 
 	runner := sandbox.NewDockerRunner(sandbox.DockerRunnerOptions{
 		Binary: "docker", CleanupJournal: newCleanupJournal(t, runID), TemporaryRoot: t.TempDir(), LockRoot: t.TempDir(), CleanupTimeout: 5 * time.Second,
@@ -278,7 +280,7 @@ func TestDockerRunnerPreservesExactStableLabelVolumeCollision(t *testing.T) {
 func TestStartupCleanerUsesOnlyTheActiveSandboxClaim(t *testing.T) {
 	requireDockerIntegration(t)
 
-	runID := "integration-claim-scope"
+	runID := uniqueDockerRunID(t, "integration-claim-scope")
 	runFingerprint := fingerprint(runID)
 	projectName := "rehearse-" + runFingerprint[:24]
 	activeClaim := strings.Repeat("f", 64)
@@ -290,12 +292,11 @@ func TestStartupCleanerUsesOnlyTheActiveSandboxClaim(t *testing.T) {
 		"stale":  projectName + "_stale",
 	}
 	for _, name := range names {
-		_ = exec.Command("docker", "volume", "rm", "--force", name).Run()
-		name := name
-		t.Cleanup(func() { _ = exec.Command("docker", "volume", "rm", "--force", name).Run() })
+		registerDockerTestCleanup(t, "volume", name, runID)
 	}
 	create := func(name, claimID, generation string) {
 		args := []string{"volume", "create",
+			"--label", dockerTestOwnerLabel + "=" + runID,
 			"--label", "dev.rehearse.managed=true",
 			"--label", "dev.rehearse.run-fingerprint=" + runFingerprint,
 			"--label", "dev.rehearse.project=" + projectName,
@@ -628,6 +629,32 @@ func dockerOutput(t *testing.T, args ...string) string {
 		t.Fatalf("docker %s: %v\n%s", strings.Join(args, " "), err, output)
 	}
 	return strings.TrimSpace(string(output))
+}
+
+func uniqueDockerRunID(t *testing.T, prefix string) string {
+	t.Helper()
+	return prefix + "-" + fingerprint(t.TempDir())[:16]
+}
+
+func registerDockerTestCleanup(t *testing.T, kind, name, owner string) {
+	t.Helper()
+	t.Cleanup(func() {
+		output, err := exec.Command("docker", kind, "inspect", "--format", `{{ index .Labels "`+dockerTestOwnerLabel+`" }}`, name).CombinedOutput()
+		if err != nil {
+			return
+		}
+		if got := strings.TrimSpace(string(output)); got != owner {
+			t.Errorf("refusing to clean %s %q owned by %q, want %q", kind, name, got, owner)
+			return
+		}
+		args := []string{kind, "rm", name}
+		if kind == "volume" {
+			args = []string{kind, "rm", "--force", name}
+		}
+		if output, err := exec.Command("docker", args...).CombinedOutput(); err != nil {
+			t.Errorf("clean test %s %q: %v\n%s", kind, name, err, output)
+		}
+	})
 }
 
 func assertNoRunResources(t *testing.T, runID string) {
