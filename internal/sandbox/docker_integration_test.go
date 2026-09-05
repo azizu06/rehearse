@@ -269,8 +269,8 @@ func TestDockerRunnerPreservesExactStableLabelVolumeCollision(t *testing.T) {
 		t.Fatal("callback ran after an exact stable-label collision")
 		return nil
 	})
-	if !errors.Is(err, sandbox.ErrProjectExists) {
-		t.Fatalf("Run error = %v, want ErrProjectExists", err)
+	if !errors.Is(err, sandbox.ErrProjectCollision) {
+		t.Fatalf("Run error = %v, want ErrProjectCollision", err)
 	}
 	if got := dockerOutput(t, "volume", "ls", "--quiet", "--filter", "name=^"+volumeName+"$"); got == "" {
 		t.Fatal("runner deleted the pre-existing stable-label volume")
