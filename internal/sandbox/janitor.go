@@ -67,16 +67,9 @@ func (janitor *Janitor) Reconcile(ctx context.Context) error {
 	}
 	var reconciliationErrors []error
 	for _, queued := range runs {
-		run := queued
-		at := janitor.eventTime(run)
-		switch {
-		case run.Outcome == "":
-			run, err = janitor.store.RecordOutcome(ctx, run.ID, drill.OutcomeFailed, at)
-		case run.Cleanup == drill.CleanupFailed:
-			run, err = janitor.store.BeginCleanupRetry(ctx, run.ID, at)
-		}
-		if err != nil {
-			reconciliationErrors = append(reconciliationErrors, fmt.Errorf("prepare run %s cleanup retry: %w", run.ID, err))
+		run, prepareErr := janitor.prepare(ctx, queued)
+		if prepareErr != nil {
+			reconciliationErrors = append(reconciliationErrors, fmt.Errorf("prepare run %s cleanup retry: %w", queued.ID, prepareErr))
 			continue
 		}
 
@@ -102,6 +95,17 @@ func (janitor *Janitor) Reconcile(ctx context.Context) error {
 		}
 	}
 	return errors.Join(reconciliationErrors...)
+}
+
+func (janitor *Janitor) prepare(ctx context.Context, queued drill.Run) (drill.Run, error) {
+	at := janitor.eventTime(queued)
+	switch {
+	case queued.Outcome == "":
+		return janitor.store.RecordOutcome(ctx, queued.ID, drill.OutcomeFailed, at)
+	case queued.Cleanup == drill.CleanupFailed:
+		return janitor.store.BeginCleanupRetry(ctx, queued.ID, at)
+	}
+	return queued, nil
 }
 
 func (janitor *Janitor) eventTime(run drill.Run) time.Time {

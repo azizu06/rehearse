@@ -93,6 +93,66 @@ func TestJanitorRetriesFailedCleanupUntilItSucceeds(t *testing.T) {
 	}
 }
 
+func TestJanitorReconcilesLaterRunsAfterAnEarlierFailure(t *testing.T) {
+	t.Parallel()
+
+	at := time.Date(2026, time.July, 15, 16, 0, 0, 0, time.UTC)
+	store := &stubReconciliationStore{
+		queue: []drill.Run{
+			{ID: "run-a", Cleanup: drill.CleanupPending, UpdatedAt: at},
+			{ID: "run-b", Outcome: drill.OutcomeFailed, Cleanup: drill.CleanupPending, UpdatedAt: at},
+		},
+		outcomeErr: errors.New("concurrent mutation"),
+	}
+	cleaner := &sequencedCleaner{}
+	options := sandbox.JanitorOptions{CleanupTimeout: time.Second, Now: (&sequenceClock{next: at}).Now}
+
+	err := sandbox.ReconcileStartup(context.Background(), store, cleaner, options)
+	if err == nil || !strings.Contains(err.Error(), "run-a") {
+		t.Fatalf("ReconcileStartup error = %v, want one naming run-a", err)
+	}
+	if store.claimed != "run-b" {
+		t.Fatalf("claimed = %q, want run-b", store.claimed)
+	}
+	if store.cleanedRun != "run-b" || store.cleanedStatus != drill.CleanupSucceeded {
+		t.Fatalf("RecordCleanup(%q, %q), want run-b succeeded", store.cleanedRun, store.cleanedStatus)
+	}
+}
+
+type stubReconciliationStore struct {
+	queue         []drill.Run
+	outcomeErr    error
+	claimed       string
+	cleanedRun    string
+	cleanedStatus drill.CleanupStatus
+}
+
+func (store *stubReconciliationStore) RunsNeedingReconciliation(context.Context) ([]drill.Run, error) {
+	return store.queue, nil
+}
+
+func (store *stubReconciliationStore) SandboxCleanupClaim(_ context.Context, runID string) (string, []drill.SandboxResourceClaim, bool, error) {
+	store.claimed = runID
+	return strings.Repeat("e", 64), nil, true, nil
+}
+
+func (store *stubReconciliationStore) RecordOutcome(_ context.Context, runID string, _ drill.Outcome, _ time.Time) (drill.Run, error) {
+	if store.outcomeErr != nil {
+		return drill.Run{}, store.outcomeErr
+	}
+	return drill.Run{ID: runID}, nil
+}
+
+func (store *stubReconciliationStore) BeginCleanupRetry(_ context.Context, runID string, _ time.Time) (drill.Run, error) {
+	return drill.Run{ID: runID}, nil
+}
+
+func (store *stubReconciliationStore) RecordCleanup(_ context.Context, runID string, status drill.CleanupStatus, _ time.Time) (drill.Run, error) {
+	store.cleanedRun = runID
+	store.cleanedStatus = status
+	return drill.Run{ID: runID, Cleanup: status}, nil
+}
+
 type sequencedCleaner struct {
 	errors []error
 }
