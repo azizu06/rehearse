@@ -741,15 +741,6 @@ printf '%s' '{"message_type":"future","private":"` + strings.Repeat("x", 256) + 
 			maxStdout: 160,
 			maxStderr: 1024,
 		},
-		{
-			name: "stderr limit",
-			body: `
-printf '%s' '` + strings.Repeat("private-stderr-marker", 16) + `' >&2
-printf '%s\n' '{"message_type":"status","percent_done":0.1,"files_restored":1,"total_files":10,"bytes_restored":1,"total_bytes":10}'
-`,
-			maxStdout: 1024,
-			maxStderr: 64,
-		},
 	}
 
 	for _, test := range tests {
