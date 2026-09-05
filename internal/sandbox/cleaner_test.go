@@ -115,6 +115,51 @@ func TestCleanerDoesNotCascadeContainerRemovalIntoUnlabeledVolumes(t *testing.T)
 	}
 }
 
+func TestCleanerRemovesNetworksWithoutUnsupportedForceFlag(t *testing.T) {
+	identity := claimedTestIdentity(t, "run-network-remove-arguments")
+	name := identity.projectName + "_default"
+
+	tests := []struct {
+		name    string
+		cleanup func(cleaner, *scriptedDocker) error
+	}{
+		{
+			name: "startup manifest",
+			cleanup: func(cleaner cleaner, _ *scriptedDocker) error {
+				manifest := []drill.SandboxResourceClaim{{Kind: "network", Name: name, Generation: testResourceGeneration}}
+				return cleaner.cleanupManifest(context.Background(), identity, manifest)
+			},
+		},
+		{
+			name: "live ledger",
+			cleanup: func(cleaner cleaner, _ *scriptedDocker) error {
+				ledger := newCreatedResourceLedger()
+				ledger.add(createdResource{kind: "network", name: name, daemonID: name, generation: testResourceGeneration})
+				return cleaner.cleanupCreated(context.Background(), identity, ledger)
+			},
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			command := &scriptedDocker{
+				lists:    map[string][][]byte{"network": {[]byte(name + "\n"), nil, nil, nil}},
+				identity: identity, generation: testResourceGeneration,
+			}
+			cleaner := cleaner{command: command, waiter: &recordingWaiter{}, quiescence: 500 * time.Millisecond}
+			if err := test.cleanup(cleaner, command); err != nil {
+				t.Fatalf("cleanup: %v", err)
+			}
+			if !command.calledWith("network", "rm", name) {
+				t.Fatalf("network removal argv = %#v, want network rm <id>", command.calls)
+			}
+			if command.calledWith("network", "rm", "--force", name) {
+				t.Fatalf("network removal used unsupported --force: %#v", command.calls)
+			}
+		})
+	}
+}
+
 func TestLiveCleanupPreservesSameTimestampVolumeGenerationReplacement(t *testing.T) {
 	identity := claimedTestIdentity(t, "run-daemon-replacement")
 	name := identity.projectName + "_work"

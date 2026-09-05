@@ -190,7 +190,7 @@ func (docker *mutationDocker) run(_ context.Context, _ int64, args ...string) ([
 		}
 		return nil, os.ErrNotExist
 	}
-	if len(args) >= 4 && args[1] == "rm" {
+	if len(args) >= 3 && args[1] == "rm" {
 		for key, resource := range docker.resources {
 			if strings.HasPrefix(key, args[0]+"\x00") && (resource.Name == args[len(args)-1] || resource.DaemonID == args[len(args)-1]) {
 				delete(docker.resources, key)

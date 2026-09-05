@@ -133,18 +133,16 @@ func (cleaner cleaner) cleanupUntilQuiet(ctx context.Context, identity identity,
 }
 
 func cleanupResourceKinds() []struct {
-	name       string
-	listArgs   []string
-	removeArgs []string
+	name     string
+	listArgs []string
 } {
 	return []struct {
-		name       string
-		listArgs   []string
-		removeArgs []string
+		name     string
+		listArgs []string
 	}{
-		{name: "container", listArgs: []string{"container", "ls", "--all", "--quiet"}, removeArgs: []string{"container", "rm", "--force"}},
-		{name: "network", listArgs: []string{"network", "ls", "--quiet"}, removeArgs: []string{"network", "rm", "--force"}},
-		{name: "volume", listArgs: []string{"volume", "ls", "--quiet"}, removeArgs: []string{"volume", "rm", "--force"}},
+		{name: "container", listArgs: []string{"container", "ls", "--all", "--quiet"}},
+		{name: "network", listArgs: []string{"network", "ls", "--quiet"}},
+		{name: "volume", listArgs: []string{"volume", "ls", "--quiet"}},
 	}
 }
 
@@ -183,7 +181,7 @@ func (cleaner cleaner) removeManifestPass(ctx context.Context, identity identity
 		if resource.Kind == "volume" {
 			removeTarget = inspected.Name
 		}
-		args := []string{resource.Kind, "rm", "--force", removeTarget}
+		args := removeResourceArgs(resource.Kind, removeTarget)
 		if _, err := cleaner.command.run(ctx, cleanupOutputLimit, args...); err != nil {
 			remaining, inspectErr := inspectResource(ctx, cleaner.command, descriptor)
 			if inspectErr == nil && labelsContain(remaining.Labels, labels) {
@@ -221,7 +219,7 @@ func (cleaner cleaner) removeLedgerPass(ctx context.Context, identity identity, 
 		if created.kind == "volume" {
 			removeTarget = inspected.Name
 		}
-		removeArgs := []string{created.kind, "rm", "--force", removeTarget}
+		removeArgs := removeResourceArgs(created.kind, removeTarget)
 		if _, err := cleaner.command.run(ctx, cleanupOutputLimit, removeArgs...); err != nil {
 			remaining, inspectErr := inspectResource(ctx, cleaner.command, descriptor)
 			if inspectErr == nil && labelsContain(remaining.Labels, labels) &&
@@ -269,6 +267,13 @@ func (cleaner cleaner) removeLedgerPass(ctx context.Context, identity identity, 
 		}
 	}
 	return empty, nil
+}
+
+func removeResourceArgs(kind, target string) []string {
+	if kind == "network" {
+		return []string{kind, "rm", target}
+	}
+	return []string{kind, "rm", "--force", target}
 }
 
 func (cleaner cleaner) list(ctx context.Context, args []string, identity identity) ([]string, error) {

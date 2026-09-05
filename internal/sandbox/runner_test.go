@@ -274,7 +274,7 @@ func (docker *runnerDocker) run(ctx context.Context, _ int64, args ...string) ([
 		}
 		return nil, errors.New("resource not found")
 	}
-	if len(args) >= 4 && args[1] == "rm" {
+	if len(args) >= 3 && args[1] == "rm" {
 		if resource, exists := docker.findResource(args[0], args[len(args)-1]); exists {
 			delete(docker.resources, args[0]+"\x00"+resource.Name)
 			docker.removed = append(docker.removed, createdResource{kind: args[0], name: resource.Name, daemonID: resource.DaemonID})

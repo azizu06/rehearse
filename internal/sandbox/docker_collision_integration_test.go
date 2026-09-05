@@ -26,10 +26,10 @@ func TestRealDockerLateStableCollisionPreservesCollisionAndCleansReservation(t *
 	volumeName := stable.projectName + "_work"
 	networkName := stable.projectName + "_default"
 	_ = exec.Command("docker", "volume", "rm", "--force", volumeName).Run()
-	_ = exec.Command("docker", "network", "rm", "--force", networkName).Run()
+	_ = exec.Command("docker", "network", "rm", networkName).Run()
 	t.Cleanup(func() {
 		_ = exec.Command("docker", "volume", "rm", "--force", volumeName).Run()
-		_ = exec.Command("docker", "network", "rm", "--force", networkName).Run()
+		_ = exec.Command("docker", "network", "rm", networkName).Run()
 	})
 
 	root := t.TempDir()
@@ -72,8 +72,8 @@ func TestRealDockerLiveCleanupPreservesDaemonIdentityReplacement(t *testing.T) {
 	identity, _ := newIdentity("integration-daemon-replacement")
 	identity, _ = identity.withClaimID(testClaimID)
 	name := identity.projectName + "_replacement"
-	_ = exec.Command("docker", "network", "rm", "--force", name).Run()
-	t.Cleanup(func() { _ = exec.Command("docker", "network", "rm", "--force", name).Run() })
+	_ = exec.Command("docker", "network", "rm", name).Run()
+	t.Cleanup(func() { _ = exec.Command("docker", "network", "rm", name).Run() })
 	originalGeneration := strings.Repeat("4", 64)
 	replacementGeneration := strings.Repeat("5", 64)
 	create := func(generation string) string {
@@ -93,7 +93,7 @@ func TestRealDockerLiveCleanupPreservesDaemonIdentityReplacement(t *testing.T) {
 		return strings.TrimSpace(string(output))
 	}
 	originalID := create(originalGeneration)
-	if output, err := exec.Command("docker", "network", "rm", "--force", originalID).CombinedOutput(); err != nil {
+	if output, err := exec.Command("docker", "network", "rm", originalID).CombinedOutput(); err != nil {
 		t.Fatalf("remove original network: %v\n%s", err, output)
 	}
 	replacementID := create(replacementGeneration)
