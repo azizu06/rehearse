@@ -1,6 +1,6 @@
 module github.com/azizu06/rehearse
 
-go 1.26.5
+go 1.26.8
 
 require (
 	github.com/minio/minio-go/v7 v7.2.1
