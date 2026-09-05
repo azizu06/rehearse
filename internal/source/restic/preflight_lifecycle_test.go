@@ -17,6 +17,70 @@ func (lifecycleCredentialResolver) Resolve(context.Context, drill.CredentialRefe
 	return []byte("fixture-password"), nil
 }
 
+type blockingLifecycleResolver struct {
+	started chan struct{}
+	release chan struct{}
+}
+
+func (resolver blockingLifecycleResolver) Resolve(context.Context, drill.CredentialReference) ([]byte, error) {
+	close(resolver.started)
+	<-resolver.release
+	return []byte("fixture-password"), nil
+}
+
+func TestPreflightWaitsForVerifiedOperationLease(t *testing.T) {
+	started := make(chan struct{})
+	release := make(chan struct{})
+	binary := filepath.Join(t.TempDir(), "restic")
+	if err := os.WriteFile(binary, []byte(`#!/bin/sh
+case " $* " in
+  *" version "*) printf '%s\n' '{"message_type":"version","version":"0.19.1"}' ;;
+  *" snapshots "*) printf '%s\n' '[]' ;;
+  *) exit 90 ;;
+esac
+`), 0o700); err != nil {
+		t.Fatalf("write fake restic: %v", err)
+	}
+	adapter, err := New(Config{
+		Binary:            binary,
+		Repository:        Repository{Kind: RepositoryLocal, Location: t.TempDir()},
+		Password:          drill.CredentialReference{Provider: drill.CredentialEnvironment, Locator: "REHEARSE_TEST_RESTIC_PASSWORD"},
+		CredentialTempDir: t.TempDir(),
+	}, blockingLifecycleResolver{started: started, release: release})
+	if err != nil {
+		t.Fatalf("new adapter: %v", err)
+	}
+	if _, err := adapter.Capabilities(context.Background()); err != nil {
+		t.Fatalf("initial preflight: %v", err)
+	}
+
+	listDone := make(chan error, 1)
+	go func() {
+		_, err := adapter.ListRecoveryPoints(context.Background())
+		listDone <- err
+	}()
+	receiveLifecycleValue(t, started)
+
+	preflightDone := make(chan error, 1)
+	go func() {
+		_, err := adapter.Capabilities(context.Background())
+		preflightDone <- err
+	}()
+	select {
+	case err := <-preflightDone:
+		t.Fatalf("preflight bypassed active verified operation: %v", err)
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	close(release)
+	if err := receiveLifecycleValue(t, listDone); err != nil {
+		t.Fatalf("list recovery points: %v", err)
+	}
+	if err := receiveLifecycleValue(t, preflightDone); err != nil {
+		t.Fatalf("preflight after operation: %v", err)
+	}
+}
+
 func TestPreflightGateReleaseWindowRemainsFailClosed(t *testing.T) {
 	adapter := newLifecycleTestAdapter(t)
 	hookEntered := make(chan int, 2)

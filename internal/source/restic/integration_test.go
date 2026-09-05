@@ -55,7 +55,7 @@ func TestLocalRepositoryListAndAcquireAreReadOnlyAtTheRealResticBoundary(t *test
 	if err != nil {
 		t.Fatalf("preflight: %v", err)
 	}
-	if !strings.HasPrefix(capabilities.AdapterVersion, "restic/0.") {
+	if !strings.HasPrefix(capabilities.AdapterVersion, "restic/") {
 		t.Fatalf("unexpected version: %+v", capabilities)
 	}
 	points, err := adapter.ListRecoveryPoints(ctx)

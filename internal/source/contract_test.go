@@ -2,6 +2,8 @@ package source_test
 
 import (
 	"context"
+	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -80,5 +82,70 @@ func TestConfiguredAdapterContractIsVendorIndependent(t *testing.T) {
 	}
 	if artifact.RecoveryPointID != points[0].ID || progress.PercentDone != 1 {
 		t.Fatalf("unexpected artifact/progress: artifact=%+v progress=%+v", artifact, progress)
+	}
+}
+
+type cancellationAdapter struct{}
+
+func (cancellationAdapter) Capabilities(context.Context) (source.Capabilities, error) {
+	return source.Capabilities{AdapterVersion: "contract-fixture/1", Acquires: true}, nil
+}
+
+func (cancellationAdapter) ListRecoveryPoints(context.Context) ([]source.RecoveryPoint, error) {
+	return nil, nil
+}
+
+func (cancellationAdapter) Acquire(ctx context.Context, _ source.AcquireRequest) (source.Artifact, error) {
+	<-ctx.Done()
+	kind := source.FailureCancelled
+	hint := "source acquisition was cancelled"
+	if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+		kind = source.FailureTimeout
+		hint = "source acquisition timed out"
+	}
+	return source.Artifact{}, &source.Failure{Kind: kind, Operation: "acquire", SafeHint: hint}
+}
+
+func TestConfiguredAdapterContractDefinesCancellationAndTypedFailures(t *testing.T) {
+	t.Parallel()
+
+	var adapter source.Adapter = cancellationAdapter{}
+	contexts := []struct {
+		name string
+		ctx  func() (context.Context, context.CancelFunc)
+		kind source.FailureKind
+	}{
+		{
+			name: "cancelled",
+			ctx: func() (context.Context, context.CancelFunc) {
+				ctx, cancel := context.WithCancel(context.Background())
+				cancel()
+				return ctx, func() {}
+			},
+			kind: source.FailureCancelled,
+		},
+		{
+			name: "timed out",
+			ctx: func() (context.Context, context.CancelFunc) {
+				return context.WithDeadline(context.Background(), time.Unix(0, 0))
+			},
+			kind: source.FailureTimeout,
+		},
+	}
+
+	for _, test := range contexts {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			ctx, cancel := test.ctx()
+			defer cancel()
+			_, err := adapter.Acquire(ctx, source.AcquireRequest{RecoveryPointID: "private-recovery-point"})
+			var failure *source.Failure
+			if !errors.As(err, &failure) || failure.Kind != test.kind || failure.Operation != "acquire" {
+				t.Fatalf("failure = %+v, want %s acquire failure", failure, test.kind)
+			}
+			if strings.Contains(err.Error(), "private-recovery-point") {
+				t.Fatalf("typed failure leaked request data: %v", err)
+			}
+		})
 	}
 }

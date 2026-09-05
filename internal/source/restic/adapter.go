@@ -127,6 +127,13 @@ func New(config Config, resolver source.CredentialResolver) (*Adapter, error) {
 	if config.CredentialTempDir != "" && (!filepath.IsAbs(config.CredentialTempDir) || filepath.Clean(config.CredentialTempDir) != config.CredentialTempDir) {
 		return nil, &source.Failure{Kind: source.FailureInvalidInput, Operation: "configure", SafeHint: "credential temp directory must be a clean absolute path"}
 	}
+	credentialTempDir := config.CredentialTempDir
+	if credentialTempDir == "" {
+		credentialTempDir = os.TempDir()
+	}
+	if config.Repository.Kind == RepositoryLocal && pathInsideOrSame(credentialTempDir, config.Repository.Location) {
+		return nil, &source.Failure{Kind: source.FailureInvalidInput, Operation: "configure", SafeHint: "credential temp directory must be outside the local restic repository"}
+	}
 	if config.MaxStdoutBytes == 0 {
 		config.MaxStdoutBytes = defaultMaxStdoutBytes
 	}
@@ -140,6 +147,20 @@ func New(config Config, resolver source.CredentialResolver) (*Adapter, error) {
 		return nil, &source.Failure{Kind: source.FailureInvalidInput, Operation: "configure", SafeHint: "restic output limits exceed the supported maximum"}
 	}
 	return &Adapter{config: config, resolver: resolver, preflightGate: make(chan struct{}, 1)}, nil
+}
+
+func pathInsideOrSame(path string, parent string) bool {
+	if lexicalPathInsideOrSame(path, parent) {
+		return true
+	}
+	resolvedPath, pathErr := filepath.EvalSymlinks(path)
+	resolvedParent, parentErr := filepath.EvalSymlinks(parent)
+	return pathErr == nil && parentErr == nil && lexicalPathInsideOrSame(resolvedPath, resolvedParent)
+}
+
+func lexicalPathInsideOrSame(path string, parent string) bool {
+	relative, err := filepath.Rel(parent, path)
+	return err == nil && relative != ".." && !strings.HasPrefix(relative, ".."+string(filepath.Separator)) && !filepath.IsAbs(relative)
 }
 
 func snapshotConfig(config Config) Config {
@@ -258,6 +279,22 @@ func (adapter *Adapter) requirePreflight(operation string) error {
 	return &source.Failure{Kind: source.FailureUnsupported, Operation: operation, SafeHint: "restic capability preflight is required"}
 }
 
+func (adapter *Adapter) beginVerifiedOperation(ctx context.Context, operation string) (func(), error) {
+	if err := adapter.requirePreflight(operation); err != nil {
+		return nil, err
+	}
+	select {
+	case adapter.preflightGate <- struct{}{}:
+	case <-ctx.Done():
+		return nil, contextFailure(operation, ctx.Err())
+	}
+	if err := adapter.requirePreflight(operation); err != nil {
+		<-adapter.preflightGate
+		return nil, err
+	}
+	return func() { <-adapter.preflightGate }, nil
+}
+
 func supportedVersion(version string) bool {
 	candidate := "v" + version
 	return semanticVersionPattern.MatchString(version) && semver.IsValid(candidate) && semver.Compare(candidate, minimumVersion) >= 0
@@ -347,11 +384,13 @@ type snapshotSummary struct {
 
 // ListRecoveryPoints maps restic snapshot JSON into the source contract.
 func (adapter *Adapter) ListRecoveryPoints(ctx context.Context) ([]source.RecoveryPoint, error) {
-	if err := adapter.requirePreflight("list"); err != nil {
+	release, err := adapter.beginVerifiedOperation(ctx, "list")
+	if err != nil {
 		return nil, err
 	}
+	defer release()
 	var stdout []byte
-	err := adapter.withCredentialEnvironment(ctx, "list", func(environment []string) error {
+	err = adapter.withCredentialEnvironment(ctx, "list", func(environment []string) error {
 		var runErr error
 		stdout, _, runErr = adapter.run(ctx, "list", environment, "--json", "--no-lock", "--no-cache", "snapshots")
 		return runErr
@@ -591,8 +630,6 @@ func decodeVersionMessage(raw []byte) (string, error) {
 	var versionRaw json.RawMessage
 	messageTypeCount := 0
 	versionCount := 0
-	alternateMessageType := false
-	alternateVersion := false
 	for _, member := range members {
 		switch member.name {
 		case "message_type":
@@ -601,12 +638,9 @@ func decodeVersionMessage(raw []byte) (string, error) {
 		case "version":
 			versionCount++
 			versionRaw = member.value
-		default:
-			alternateMessageType = alternateMessageType || strings.EqualFold(member.name, "message_type")
-			alternateVersion = alternateVersion || strings.EqualFold(member.name, "version")
 		}
 	}
-	if messageTypeCount != 1 || versionCount != 1 || alternateMessageType || alternateVersion {
+	if messageTypeCount != 1 || versionCount != 1 {
 		return "", errInvalidVersionMessage
 	}
 	messageType, ok := decodeJSONString(messageTypeRaw)
@@ -627,16 +661,13 @@ func decodeResticMessageType(raw json.RawMessage) (string, error) {
 	}
 	var encoded json.RawMessage
 	messageTypeCount := 0
-	alternateMessageType := false
 	for _, member := range members {
 		if member.name == "message_type" {
 			messageTypeCount++
 			encoded = member.value
-		} else {
-			alternateMessageType = alternateMessageType || strings.EqualFold(member.name, "message_type")
 		}
 	}
-	if messageTypeCount != 1 || alternateMessageType {
+	if messageTypeCount != 1 {
 		return "", errInvalidResticMessageType
 	}
 	messageType, ok := decodeJSONString(encoded)
@@ -647,18 +678,15 @@ func decodeResticMessageType(raw json.RawMessage) (string, error) {
 }
 
 type restoreStatus struct {
-	PercentDone   restoreFraction `json:"percent_done"`
-	FilesRestored restoreCounter  `json:"files_restored"`
-	TotalFiles    restoreCounter  `json:"total_files"`
-	BytesRestored restoreCounter  `json:"bytes_restored"`
-	TotalBytes    restoreCounter  `json:"total_bytes"`
+	PercentDone restoreFraction
+	restoreSummary
 }
 
 type restoreSummary struct {
-	FilesRestored restoreCounter `json:"files_restored"`
-	TotalFiles    restoreCounter `json:"total_files"`
-	BytesRestored restoreCounter `json:"bytes_restored"`
-	TotalBytes    restoreCounter `json:"total_bytes"`
+	FilesRestored restoreCounter
+	TotalFiles    restoreCounter
+	BytesRestored restoreCounter
+	TotalBytes    restoreCounter
 }
 
 // restoreCounter accepts an omitted field as restic's documented zero value,
@@ -672,11 +700,61 @@ func decodeRestoreSummary(raw json.RawMessage) (restoreSummary, error) {
 	if err != nil || messageType != "summary" {
 		return restoreSummary{}, errInvalidRestoreSummary
 	}
-	var summary restoreSummary
-	if err := json.Unmarshal(raw, &summary); err != nil || summary.FilesRestored > summary.TotalFiles || summary.BytesRestored > summary.TotalBytes {
+	summary, _, err := decodeRestoreFields(raw, false)
+	if err != nil || summary.FilesRestored > summary.TotalFiles || summary.BytesRestored > summary.TotalBytes {
 		return restoreSummary{}, errInvalidRestoreSummary
 	}
 	return summary, nil
+}
+
+func decodeRestoreStatus(raw json.RawMessage) (restoreStatus, error) {
+	messageType, err := decodeResticMessageType(raw)
+	if err != nil || messageType != "status" {
+		return restoreStatus{}, errInvalidRestoreSummary
+	}
+	summary, percentDone, err := decodeRestoreFields(raw, true)
+	if err != nil {
+		return restoreStatus{}, errInvalidRestoreSummary
+	}
+	return restoreStatus{PercentDone: percentDone, restoreSummary: summary}, nil
+}
+
+func decodeRestoreFields(raw json.RawMessage, includePercent bool) (restoreSummary, restoreFraction, error) {
+	members, ok := decodeJSONObjectMembers(raw)
+	if !ok {
+		return restoreSummary{}, 0, errInvalidRestoreSummary
+	}
+	var summary restoreSummary
+	var percentDone restoreFraction
+	seen := make(map[string]bool, 5)
+	for _, member := range members {
+		var target any
+		switch member.name {
+		case "percent_done":
+			if !includePercent {
+				continue
+			}
+			target = &percentDone
+		case "files_restored":
+			target = &summary.FilesRestored
+		case "total_files":
+			target = &summary.TotalFiles
+		case "bytes_restored":
+			target = &summary.BytesRestored
+		case "total_bytes":
+			target = &summary.TotalBytes
+		default:
+			continue
+		}
+		if seen[member.name] {
+			return restoreSummary{}, 0, errInvalidRestoreSummary
+		}
+		seen[member.name] = true
+		if err := json.Unmarshal(member.value, target); err != nil {
+			return restoreSummary{}, 0, errInvalidRestoreSummary
+		}
+	}
+	return summary, percentDone, nil
 }
 
 func (counter *restoreCounter) UnmarshalJSON(data []byte) error {
@@ -706,9 +784,11 @@ func (fraction *restoreFraction) UnmarshalJSON(data []byte) error {
 // Acquire restores one full snapshot into a private staging child, then
 // atomically promotes it after a valid completion summary.
 func (adapter *Adapter) Acquire(ctx context.Context, request source.AcquireRequest) (_ source.Artifact, returnErr error) {
-	if err := adapter.requirePreflight("acquire"); err != nil {
+	release, err := adapter.beginVerifiedOperation(ctx, "acquire")
+	if err != nil {
 		return source.Artifact{}, err
 	}
+	defer release()
 	if !snapshotIDPattern.MatchString(request.RecoveryPointID) {
 		return source.Artifact{}, &source.Failure{Kind: source.FailureInvalidInput, Operation: "acquire", SafeHint: "a full restic snapshot ID is required"}
 	}
@@ -827,8 +907,8 @@ func (adapter *Adapter) runRestore(
 		}
 		switch messageType {
 		case "status":
-			var status restoreStatus
-			if err := json.Unmarshal(raw, &status); err != nil {
+			status, err := decodeRestoreStatus(raw)
+			if err != nil {
 				return finishRestore(ctx, command, cancel, limited, &stderr, &source.Failure{Kind: source.FailureCorruptOutput, Operation: "acquire", SafeHint: "restic returned invalid restore progress"})
 			}
 			percentDone := float64(status.PercentDone)
@@ -950,8 +1030,6 @@ func decodeStructuredExitObject(raw json.RawMessage) (string, json.Number, bool,
 	var codeRaw json.RawMessage
 	messageTypeCount := 0
 	codeCount := 0
-	alternateMessageType := false
-	alternateCode := false
 	for _, member := range members {
 		switch member.name {
 		case "message_type":
@@ -960,12 +1038,9 @@ func decodeStructuredExitObject(raw json.RawMessage) (string, json.Number, bool,
 		case "code":
 			codeCount++
 			codeRaw = member.value
-		default:
-			alternateMessageType = alternateMessageType || strings.EqualFold(member.name, "message_type")
-			alternateCode = alternateCode || strings.EqualFold(member.name, "code")
 		}
 	}
-	if messageTypeCount != 1 || alternateMessageType {
+	if messageTypeCount != 1 {
 		return "", "", false, errInvalidStructuredExit
 	}
 	messageType, ok := decodeJSONString(messageTypeRaw)
@@ -975,7 +1050,7 @@ func decodeStructuredExitObject(raw json.RawMessage) (string, json.Number, bool,
 	if messageType != "exit_error" {
 		return messageType, "", false, nil
 	}
-	if codeCount != 1 || alternateCode {
+	if codeCount != 1 {
 		return "", "", false, errInvalidStructuredExit
 	}
 	codeDecoder := json.NewDecoder(bytes.NewReader(codeRaw))

@@ -56,7 +56,7 @@ func TestListMapsStructuredExitErrorsWithoutLeakingOutput(t *testing.T) {
 			credentialTempDir := t.TempDir()
 			binary := writeFakeResticScript(t, `
 printf '%s\n' '{"message_type":"future_error","message":"`+privateOutput+`"}' >&2
-printf '%s\n' '{"message_type":"exit_error","code":`+strconv.Itoa(test.exitCode)+`,"message":"`+privateOutput+`"}' >&2
+printf '%s\n' '{"message_type":"exit_error","Message_Type":"future_error","code":`+strconv.Itoa(test.exitCode)+`,"Code":999,"message":"`+privateOutput+`"}' >&2
 exit `+strconv.Itoa(test.exitCode)+`
 `)
 			adapter := newTestAdapter(t, resticadapter.Config{
@@ -416,8 +416,8 @@ test -n "$target" || exit 93
 mkdir -p "$target/data"
 printf 'recovered' > "$target/data/orders.db"
 printf '%s\n' '{"message_type":"future_progress","private_path":"must-be-ignored"}'
-printf '%s\n' '{"message_type":"status","percent_done":0.5,"files_restored":1,"total_files":2,"bytes_restored":64,"total_bytes":128,"future_field":true}'
-printf '%s\n' '{"message_type":"summary","files_restored":2,"total_files":2,"bytes_restored":128,"total_bytes":128}'
+printf '%s\n' '{"message_type":"status","Message_Type":"future","percent_done":0.5,"files_restored":1,"Files_Restored":999,"total_files":2,"bytes_restored":64,"total_bytes":128,"future_field":true}'
+printf '%s\n' '{"message_type":"summary","Message_Type":"future","files_restored":2,"Files_Restored":999,"total_files":2,"bytes_restored":128,"total_bytes":128}'
 `)
 	adapter := newTestAdapter(t, resticadapter.Config{
 		Binary: binary,
@@ -502,7 +502,8 @@ func TestAcquireRejectsInvalidOrMissingSummaryBeforePromotion(t *testing.T) {
 		{name: "files exceed total", summary: `{"message_type":"summary","files_restored":1}`},
 		{name: "bytes exceed total", summary: `{"message_type":"summary","bytes_restored":1}`},
 		{name: "duplicate discriminator promotes summary", summary: `{"message_type":"future","message_type":"summary"}`},
-		{name: "case-confusable discriminator", summary: `{"message_type":"summary","Message_Type":"future"}`},
+		{name: "case-variant counter cannot hide invalid exact value", summary: `{"message_type":"summary","files_restored":2,"Files_Restored":0,"total_files":1}`},
+		{name: "duplicate counter cannot hide invalid first value", summary: `{"message_type":"summary","files_restored":2,"files_restored":0,"total_files":1}`},
 	}
 
 	for _, test := range tests {
@@ -626,6 +627,8 @@ func TestAcquireRejectsInvalidStatusBeforePromotion(t *testing.T) {
 		{name: "total files wrong type", status: `{"message_type":"status","total_files":false}`},
 		{name: "bytes restored wrong type", status: `{"message_type":"status","bytes_restored":0.5}`},
 		{name: "total bytes wrong type", status: `{"message_type":"status","total_bytes":[]}`},
+		{name: "case-variant counter cannot hide invalid exact value", status: `{"message_type":"status","files_restored":2,"Files_Restored":0,"total_files":1}`},
+		{name: "duplicate counter cannot hide invalid first value", status: `{"message_type":"status","files_restored":2,"files_restored":0,"total_files":1}`},
 	}
 
 	for _, test := range tests {
@@ -1415,6 +1418,40 @@ func TestNewRejectsUnsafeRepositoryAndCredentialTempLocations(t *testing.T) {
 	}
 }
 
+func TestNewRejectsCredentialStorageInsideLocalRepository(t *testing.T) {
+	t.Parallel()
+
+	repository := t.TempDir()
+	nested := filepath.Join(repository, "credentials")
+	if err := os.Mkdir(nested, 0o700); err != nil {
+		t.Fatalf("create nested credential directory: %v", err)
+	}
+	symlink := filepath.Join(t.TempDir(), "credential-link")
+	if err := os.Symlink(nested, symlink); err != nil {
+		t.Fatalf("create credential directory symlink: %v", err)
+	}
+
+	for _, credentialTempDir := range []string{repository, nested, symlink} {
+		credentialTempDir := credentialTempDir
+		t.Run(filepath.Base(credentialTempDir), func(t *testing.T) {
+			t.Parallel()
+
+			_, err := resticadapter.New(resticadapter.Config{
+				Binary:            writeFakeRestic(t, `{"message_type":"version","version":"0.19.1"}`),
+				Repository:        resticadapter.Repository{Kind: resticadapter.RepositoryLocal, Location: repository},
+				Password:          drill.CredentialReference{Provider: drill.CredentialEnvironment, Locator: "REHEARSE_TEST_RESTIC_PASSWORD"},
+				CredentialTempDir: credentialTempDir,
+			}, credentialResolver(func(context.Context, drill.CredentialReference) ([]byte, error) {
+				return []byte("fixture-password"), nil
+			}))
+			var failure *source.Failure
+			if !errors.As(err, &failure) || failure.Kind != source.FailureInvalidInput || failure.SafeHint != "credential temp directory must be outside the local restic repository" {
+				t.Fatalf("failure = %+v, want repository-overlap rejection", failure)
+			}
+		})
+	}
+}
+
 func TestNewRejectsOutputLimitsAboveHardMaximum(t *testing.T) {
 	t.Parallel()
 
@@ -1496,6 +1533,11 @@ func TestCapabilitiesRequiresStructuredResticVersionAtLeast018(t *testing.T) {
 			wantVersion: "restic/0.18.1-rc.1",
 		},
 		{
+			name:        "next major",
+			output:      `{"message_type":"version","version":"1.0.0"}`,
+			wantVersion: "restic/1.0.0",
+		},
+		{
 			name:        "minimum with build metadata",
 			output:      `{"message_type":"version","version":"0.18.0+build.1"}`,
 			wantVersion: "restic/0.18.0+build.1",
@@ -1536,9 +1578,9 @@ func TestCapabilitiesRequiresStructuredResticVersionAtLeast018(t *testing.T) {
 			wantErr: "restic returned invalid version JSON",
 		},
 		{
-			name:    "case variants alongside exact keys",
-			output:  `{"message_type":"version","Message_Type":"version","version":"0.19.1","Version":"0.19.1"}`,
-			wantErr: "restic returned invalid version JSON",
+			name:        "case variants alongside exact keys",
+			output:      `{"message_type":"version","Message_Type":"version","version":"0.19.1","Version":"0.19.1"}`,
+			wantVersion: "restic/0.19.1",
 		},
 		{
 			name:    "missing message type",
