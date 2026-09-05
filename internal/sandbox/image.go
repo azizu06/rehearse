@@ -53,12 +53,10 @@ func inspectLocalImage(ctx context.Context, command dockerCommand, name string, 
 	if service.Image == "" {
 		return localImageMetadata{}, unsafeService(name, "a local image reference is required")
 	}
-	args := []string{"image", "inspect"}
-	if service.Platform != "" {
-		args = append(args, "--platform", service.Platform)
+	output, err := inspectLocalImageIdentity(ctx, command, service.Image, service.Platform)
+	if err != nil && service.Platform != "" {
+		output, err = inspectLocalImageIdentity(ctx, command, service.Image, "")
 	}
-	args = append(args, "--format", imageIdentityFormat, service.Image)
-	output, err := command.run(ctx, dockerMetadataOutputLimit, args...)
 	if err != nil {
 		return localImageMetadata{}, fmt.Errorf("inspect service %q selected local image: %w", name, err)
 	}
@@ -78,6 +76,15 @@ func inspectLocalImage(ctx context.Context, command dockerCommand, name string, 
 	}
 	metadata.Volumes = volumes
 	return metadata, nil
+}
+
+func inspectLocalImageIdentity(ctx context.Context, command dockerCommand, reference, platform string) ([]byte, error) {
+	args := []string{"image", "inspect"}
+	if platform != "" {
+		args = append(args, "--platform", platform)
+	}
+	args = append(args, "--format", imageIdentityFormat, reference)
+	return command.run(ctx, dockerMetadataOutputLimit, args...)
 }
 
 func inspectLocalImageVolumes(ctx context.Context, command dockerCommand, immutableImageID string) (map[string]json.RawMessage, error) {

@@ -411,7 +411,10 @@ func TestRunnerRejectsLateStableLabelReservationCollisionWithoutDeletingIt(t *te
 func TestRunnerPreservesPreExistingExactStableLabelResource(t *testing.T) {
 	request := testRunnerRequest("run-preexisting-stable-labels", time.Minute)
 	stableIdentity, _ := newIdentity(request.RunID)
-	command := &stableCollisionDocker{identity: stableIdentity}
+	volumeName := stableIdentity.projectName + "_work"
+	command := &runnerDocker{includeVolume: true, resources: map[string]inspectedResource{
+		"volume\x00" + volumeName: {Name: volumeName, Labels: stableIdentity.labels()},
+	}}
 	root := t.TempDir()
 	runner := &DockerRunner{
 		command: command,
@@ -425,33 +428,12 @@ func TestRunnerPreservesPreExistingExactStableLabelResource(t *testing.T) {
 		t.Fatal("callback ran after a pre-existing collision")
 		return nil
 	})
-	if !errors.Is(err, ErrProjectExists) {
-		t.Fatalf("Run error = %v, want ErrProjectExists", err)
+	if !errors.Is(err, ErrProjectCollision) {
+		t.Fatalf("Run error = %v, want ErrProjectCollision", err)
 	}
-	if command.removed {
+	if len(command.removed) != 0 {
 		t.Fatal("runner deleted the pre-existing stable-label resource")
 	}
-}
-
-type stableCollisionDocker struct {
-	identity identity
-	removed  bool
-}
-
-func (docker *stableCollisionDocker) run(_ context.Context, _ int64, args ...string) ([]byte, error) {
-	joined := strings.Join(args, " ")
-	if len(args) >= 2 && args[0] == "volume" && args[1] == "ls" &&
-		strings.Contains(joined, "label="+projectLabel+"="+docker.identity.projectName) &&
-		!strings.Contains(joined, "label="+sandboxClaimLabel+"=") {
-		return []byte("pre-existing-volume\n"), nil
-	}
-	if len(args) >= 2 && args[0] == "volume" && args[1] == "inspect" {
-		return []byte(docker.identity.fingerprint + "\n"), nil
-	}
-	if len(args) >= 2 && args[1] == "rm" {
-		docker.removed = true
-	}
-	return nil, nil
 }
 
 func TestRunnerRejectsReservationWhoseImmediateOwnershipVerificationMismatches(t *testing.T) {

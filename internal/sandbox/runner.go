@@ -112,9 +112,6 @@ func (runner *DockerRunner) Run(
 	}()
 	runContext, cancel := context.WithTimeout(ctx, normalized.Limits.Duration)
 	defer cancel()
-	if err := ensureProjectVacant(runContext, runner.command, normalized.identity); err != nil {
-		return instance, err
-	}
 	configArgs := append(composeArgs(normalized, ""), "config", "--format", "json", "--no-env-resolution", "--no-path-resolution")
 	resolved, err := runner.command.run(runContext, normalized.Limits.OutputBytes, configArgs...)
 	if err != nil {

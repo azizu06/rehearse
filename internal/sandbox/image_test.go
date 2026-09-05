@@ -143,6 +143,32 @@ func TestInspectLocalImageTargetsResolvedImmutableIDAfterMutableReferenceChanges
 	assertImageVolumeCall(t, inspector.calls[1], `{{json .Config.Volumes}}`)
 }
 
+func TestInspectLocalImageFallsBackWhenPlatformFlagIsUnavailable(t *testing.T) {
+	inspector := &recordingImageInspector{results: []imageInspectResult{
+		{output: []byte("unsupported-platform-flag"), err: errors.New("Docker 28.0 rejects --platform")},
+		{output: []byte(testScalarImageMetadata)},
+		{output: []byte(`null`)},
+	}}
+	metadata, err := inspectLocalImage(context.Background(), inspector, "worker", composeService{
+		Image: "registry.example/worker:latest", Platform: "linux/amd64",
+	})
+	if err != nil {
+		t.Fatalf("inspectLocalImage: %v", err)
+	}
+	if metadata.ID != testImageID || len(inspector.calls) != 3 {
+		t.Fatalf("metadata = %#v calls = %#v", metadata, inspector.calls)
+	}
+	if !containsSequence(inspector.calls[0], "--platform", "linux/amd64") {
+		t.Fatalf("first inspection did not select requested platform: %v", inspector.calls[0])
+	}
+	if containsSequence(inspector.calls[1], "--platform", "linux/amd64") {
+		t.Fatalf("compatibility retry kept unsupported platform flag: %v", inspector.calls[1])
+	}
+	if got := inspector.calls[1][len(inspector.calls[1])-1]; got != "registry.example/worker:latest" {
+		t.Fatalf("compatibility retry target = %q, want mutable caller reference", got)
+	}
+}
+
 func assertImageVolumeCall(t *testing.T, call []string, wantTemplate string) {
 	t.Helper()
 	if got, want := len(call), 5; got != want {
