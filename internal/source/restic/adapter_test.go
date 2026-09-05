@@ -512,8 +512,6 @@ printf '%s\n' '{"message_type":"summary","Message_Type":"future","files_restored
 }
 
 func TestAcquireRejectsInvalidOrMissingSummaryBeforePromotion(t *testing.T) {
-	t.Parallel()
-
 	tests := []struct {
 		name    string
 		summary string
@@ -536,7 +534,6 @@ func TestAcquireRejectsInvalidOrMissingSummaryBeforePromotion(t *testing.T) {
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			t.Parallel()
 			assertCorruptAcquireOutput(t, "printf '%s\\n' "+shellQuote(test.summary), "")
 		})
 	}
@@ -582,8 +579,6 @@ printf '%s\n' '{"message_type":"status","message_type":"future"}'`,
 }
 
 func TestAcquireRejectsInvalidStatusBeforePromotion(t *testing.T) {
-	t.Parallel()
-
 	tests := []struct {
 		name   string
 		status string
@@ -604,15 +599,12 @@ func TestAcquireRejectsInvalidStatusBeforePromotion(t *testing.T) {
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			t.Parallel()
 			assertCorruptAcquireOutput(t, "printf '%s\\n' "+shellQuote(test.status)+"\nprintf '%s\\n' '{\"message_type\":\"summary\"}'", "")
 		})
 	}
 }
 
 func TestAcquireRejectsInvalidMessageTypeBeforePromotion(t *testing.T) {
-	t.Parallel()
-
 	tests := []struct {
 		name    string
 		message string
@@ -627,7 +619,6 @@ func TestAcquireRejectsInvalidMessageTypeBeforePromotion(t *testing.T) {
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			t.Parallel()
 			assertCorruptAcquireOutput(t, "printf '%s\\n' "+shellQuote(test.message)+"\nprintf '%s\\n' '{\"message_type\":\"summary\"}'", "")
 		})
 	}
