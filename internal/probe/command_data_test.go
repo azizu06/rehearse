@@ -184,9 +184,20 @@ func TestCommandDeadlineBoundsDescendantPipe(t *testing.T) {
 	if err != nil {
 		t.Fatalf("parse descendant PID: %v", err)
 	}
-	if err := syscall.Kill(pid, 0); err == nil {
+	if processIsRunning(pid) {
 		t.Fatalf("command descendant %d still running after deadline", pid)
 	}
+}
+
+func processIsRunning(pid int) bool {
+	if err := syscall.Kill(pid, 0); err != nil {
+		return false
+	}
+	output, err := exec.Command("ps", "-o", "stat=", "-p", strconv.Itoa(pid)).Output()
+	if err != nil {
+		return false
+	}
+	return !strings.HasPrefix(strings.TrimSpace(string(output)), "Z")
 }
 
 func TestProbeCommandDeadlineHelper(t *testing.T) {
