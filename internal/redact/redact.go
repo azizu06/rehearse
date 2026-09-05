@@ -54,13 +54,13 @@ func (redactor Redactor) MaxMarkerBytes() int {
 	return len(redactor.markers[0])
 }
 
-// BoundedString redacts before returning bounded text. It retains enough
-// lookahead to avoid exposing a marker split by the output boundary.
+// BoundedString redacts before returning bounded text and removes a partial
+// marker at a truncated source boundary.
 func (redactor Redactor) BoundedString(value string, limit int) (string, bool) {
-	window := limit + redactor.MaxMarkerBytes()
 	truncated := len(value) > limit
-	if len(value) > window {
-		value = value[:window]
+	if truncated {
+		value = value[:limit]
+		value = redactor.trimMarkerPrefix(value)
 	}
 	value = redactor.String(value)
 	if len(value) > limit {
@@ -68,4 +68,18 @@ func (redactor Redactor) BoundedString(value string, limit int) (string, bool) {
 		truncated = true
 	}
 	return value, truncated
+}
+
+func (redactor Redactor) trimMarkerPrefix(value string) string {
+	trim := 0
+	for _, marker := range redactor.markers {
+		maximum := min(len(marker)-1, len(value))
+		for length := maximum; length > trim; length-- {
+			if strings.HasSuffix(value, marker[:length]) {
+				trim = length
+				break
+			}
+		}
+	}
+	return value[:len(value)-trim]
 }
