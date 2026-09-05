@@ -44,3 +44,28 @@ func (redactor Redactor) String(value string) string {
 	}
 	return value
 }
+
+// MaxMarkerBytes reports the extra source bytes needed to redact a marker that
+// begins at an evidence boundary.
+func (redactor Redactor) MaxMarkerBytes() int {
+	if len(redactor.markers) == 0 {
+		return 0
+	}
+	return len(redactor.markers[0])
+}
+
+// BoundedString redacts before returning bounded text. It retains enough
+// lookahead to avoid exposing a marker split by the output boundary.
+func (redactor Redactor) BoundedString(value string, limit int) (string, bool) {
+	window := limit + redactor.MaxMarkerBytes()
+	truncated := len(value) > limit
+	if len(value) > window {
+		value = value[:window]
+	}
+	value = redactor.String(value)
+	if len(value) > limit {
+		value = value[:limit]
+		truncated = true
+	}
+	return value, truncated
+}

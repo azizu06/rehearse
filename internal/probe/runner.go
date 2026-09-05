@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/azizu06/rehearse/internal/redact"
@@ -214,13 +215,17 @@ const (
 )
 
 type cappedBuffer struct {
-	buffer    bytes.Buffer
-	limit     int
-	truncated bool
+	buffer        bytes.Buffer
+	limit         int
+	evidenceLimit int
+	truncated     bool
 }
 
 func (buffer *cappedBuffer) Write(value []byte) (int, error) {
 	originalLength := len(value)
+	if buffer.buffer.Len()+originalLength > buffer.evidenceLimit {
+		buffer.truncated = true
+	}
 	remaining := buffer.limit - buffer.buffer.Len()
 	if remaining <= 0 {
 		buffer.truncated = buffer.truncated || originalLength > 0
@@ -235,12 +240,23 @@ func (buffer *cappedBuffer) Write(value []byte) (int, error) {
 }
 
 func (runner *Runner) runCommand(parent context.Context, spec Spec) Evidence {
-	stdout := cappedBuffer{limit: maxObservedBytes}
-	stderr := cappedBuffer{limit: maxObservedBytes}
+	captureLimit := maxObservedBytes + runner.redactor.MaxMarkerBytes()
+	stdout := cappedBuffer{limit: captureLimit, evidenceLimit: maxObservedBytes}
+	stderr := cappedBuffer{limit: captureLimit, evidenceLimit: maxObservedBytes}
 	evidence := runner.runAttempts(parent, spec, func(ctx context.Context) (string, error) {
-		stdout = cappedBuffer{limit: maxObservedBytes}
-		stderr = cappedBuffer{limit: maxObservedBytes}
+		stdout = cappedBuffer{limit: captureLimit, evidenceLimit: maxObservedBytes}
+		stderr = cappedBuffer{limit: captureLimit, evidenceLimit: maxObservedBytes}
 		command := exec.CommandContext(ctx, spec.Command.Executable, spec.Command.Args...)
+		command.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+		command.Cancel = func() error {
+			if command.Process == nil {
+				return nil
+			}
+			if err := syscall.Kill(-command.Process.Pid, syscall.SIGKILL); err != nil && !errors.Is(err, syscall.ESRCH) {
+				return err
+			}
+			return nil
+		}
 		command.WaitDelay = commandWaitDelay
 		command.Env = []string{"LANG=C", "LC_ALL=C", "PATH=/usr/bin:/bin"}
 		command.Dir = "/"
@@ -290,19 +306,12 @@ func (runner *Runner) runData(parent context.Context, spec Spec) Evidence {
 		if candidate != root && !strings.HasPrefix(candidate, root+string(os.PathSeparator)) {
 			return "", errors.New("data assertion path escapes restored root")
 		}
-		info, err := os.Lstat(candidate)
-		if err != nil {
-			return "", err
-		}
-		if !info.Mode().IsRegular() || info.Size() > maxDataBytes {
-			return "", errors.New("data assertion file exceeds safe bounds")
-		}
-		file, err := os.Open(candidate)
+		file, err := openDataFile(root, candidate)
 		if err != nil {
 			return "", err
 		}
 		defer func() { _ = file.Close() }()
-		info, err = file.Stat()
+		info, err := file.Stat()
 		if err != nil {
 			return "", err
 		}
@@ -373,15 +382,11 @@ func (runner *Runner) runAttempts(parent context.Context, spec Spec, attempt fun
 		observed, err := attempt(ctx)
 		if err == nil {
 			evidence.Status = StatusPassed
-			evidence.Observed, evidence.Truncated = boundText(observed, 33<<10, evidence.Truncated)
-			evidence.Observed = runner.redactor.String(evidence.Observed)
-			evidence.Observed, evidence.Truncated = boundText(evidence.Observed, 33<<10, evidence.Truncated)
+			evidence.Observed, evidence.Truncated = runner.redactor.BoundedString(observed, 33<<10)
 			break
 		}
 		if err != nil {
-			evidence.Detail, evidence.Truncated = boundText(err.Error(), maxObservedBytes, evidence.Truncated)
-			evidence.Detail = runner.redactor.String(evidence.Detail)
-			evidence.Detail, evidence.Truncated = boundText(evidence.Detail, maxObservedBytes, evidence.Truncated)
+			evidence.Detail, evidence.Truncated = runner.redactor.BoundedString(err.Error(), maxObservedBytes)
 		}
 		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
 			evidence.ExhaustedBy = ExhaustedDeadline
@@ -419,11 +424,4 @@ func (runner *Runner) runAttempts(parent context.Context, spec Spec, attempt fun
 	evidence.FinishedAt = runner.clock.Now().UTC()
 	evidence.Duration = evidence.FinishedAt.Sub(startedAt)
 	return evidence
-}
-
-func boundText(value string, limit int, alreadyTruncated bool) (string, bool) {
-	if len(value) <= limit {
-		return value, alreadyTruncated
-	}
-	return value[:limit], true
 }

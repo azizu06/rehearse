@@ -77,6 +77,12 @@ func TestTypedProbeConfigAndRedactedReportSurviveRestart(t *testing.T) {
 	if err := store.SaveReport(ctx, forged, redact.New(secret)); !errors.Is(err, evidence.ErrInvalidReport) {
 		t.Fatalf("SaveReport accepted evidence that hid a required probe: %v", err)
 	}
+	forged = report
+	forged.Probes = append([]probe.Evidence(nil), report.Probes...)
+	forged.Probes[0].Attempts = 100
+	if err := store.SaveReport(ctx, forged, redact.New(secret)); !errors.Is(err, evidence.ErrInvalidReport) {
+		t.Fatalf("SaveReport accepted impossible retry evidence: %v", err)
+	}
 	if err := store.SaveReport(ctx, report, redact.New(secret)); err != nil {
 		t.Fatalf("SaveReport: %v", err)
 	}

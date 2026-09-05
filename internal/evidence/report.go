@@ -18,7 +18,7 @@ import (
 
 const (
 	SchemaVersion  = "rehearse.report/v1"
-	maxReportBytes = 4 << 20
+	maxReportBytes = 20 << 20
 )
 
 var ErrInvalidReport = errors.New("invalid evidence report")

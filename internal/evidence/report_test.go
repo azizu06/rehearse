@@ -75,7 +75,7 @@ func TestParseJSONAcceptsMaximumBoundedProbeEvidence(t *testing.T) {
 			Ordinal: index + 1, ID: fmt.Sprintf("probe-%d", index+1), Kind: probe.KindCommand,
 			Required: true, Status: probe.StatusPassed, Attempts: 1,
 			StartedAt: report.Stages[0].StartedAt, FinishedAt: report.Stages[0].FinishedAt, Duration: time.Second,
-			Observed: strings.Repeat("x", 33<<10),
+			Observed: strings.Repeat("\x00", 33<<10), Detail: strings.Repeat("\x00", 16<<10),
 		}
 	}
 	encoded, err := report.CanonicalJSON(redact.Redactor{})

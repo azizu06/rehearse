@@ -54,8 +54,22 @@ func validateProbeEvidence(config probe.Config, items []probe.Evidence) error {
 	sort.Slice(declared, func(left, right int) bool { return declared[left].Ordinal < declared[right].Ordinal })
 	for index, item := range items {
 		spec := declared[index]
-		if item.Ordinal != spec.Ordinal || item.ID != spec.ID || item.Kind != spec.Kind || item.Required != spec.Required {
+		if item.Ordinal != spec.Ordinal || item.ID != spec.ID || item.Kind != spec.Kind || item.Required != spec.Required || item.Attempts > spec.Retry.MaxAttempts {
 			return fmt.Errorf("%w: report probe evidence disagrees with plan", evidence.ErrInvalidReport)
+		}
+		switch item.Status {
+		case probe.StatusPassed, probe.StatusCancelled:
+			if item.ExhaustedBy != "" {
+				return fmt.Errorf("%w: report probe exhaustion disagrees with status", evidence.ErrInvalidReport)
+			}
+		case probe.StatusFailed:
+			if item.ExhaustedBy != probe.ExhaustedAttempts || item.Attempts != spec.Retry.MaxAttempts {
+				return fmt.Errorf("%w: report probe exhaustion disagrees with status", evidence.ErrInvalidReport)
+			}
+		case probe.StatusTimedOut:
+			if item.ExhaustedBy != probe.ExhaustedDeadline {
+				return fmt.Errorf("%w: report probe exhaustion disagrees with status", evidence.ErrInvalidReport)
+			}
 		}
 	}
 	return nil

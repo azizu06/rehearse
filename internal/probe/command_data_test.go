@@ -6,7 +6,9 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -15,6 +17,7 @@ import (
 )
 
 const commandSecretMarker = "issue-10-command-secret"
+const boundarySecretMarker = "xYz987"
 
 func TestTrustedCommandAndDataAssertionAreBoundedAndRedacted(t *testing.T) {
 	t.Setenv("REHEARSE_SHOULD_NOT_BE_INHERITED", "ambient-secret")
@@ -104,7 +107,7 @@ func TestProbeCommandHelper(t *testing.T) {
 	}
 }
 
-func TestCommandDeadlineBoundsDescendantPipe(t *testing.T) {
+func TestCommandRedactsMarkerAcrossCaptureBoundary(t *testing.T) {
 	t.Parallel()
 
 	executable, err := os.Executable()
@@ -114,11 +117,55 @@ func TestCommandDeadlineBoundsDescendantPipe(t *testing.T) {
 	configuration, err := probe.ParseConfig(strings.NewReader(fmt.Sprintf(`{
   "schema_version":"rehearse.probes/v1",
   "probes":[{
-    "ordinal":1,"id":"deadline-command","kind":"command","required":true,
-    "retry":{"deadline":"20ms","backoff":"10ms","max_attempts":1},
-    "command":{"executable":%q,"args":["-test.run=TestProbeCommandDeadlineHelper","--","deadline-helper"],"expected_exit_code":0,"trust_acknowledged":true}
+    "ordinal":1,"id":"boundary-redaction","kind":"command","required":true,
+    "retry":{"deadline":"3s","backoff":"10ms","max_attempts":1},
+    "command":{"executable":%q,"args":["-test.run=TestProbeCommandRedactionBoundaryHelper","--","boundary-redact-helper"],"expected_exit_code":0,"trust_acknowledged":true}
   }]
 }`, executable)))
+	if err != nil {
+		t.Fatalf("ParseConfig: %v", err)
+	}
+	result := probe.NewRunner(probe.Options{Redactor: redact.New(boundarySecretMarker)}).Run(context.Background(), configuration)
+	if result.Probes[0].Status != probe.StatusPassed {
+		t.Fatalf("command evidence = %#v", result.Probes[0])
+	}
+	if strings.Contains(result.Probes[0].Observed, boundarySecretMarker) || strings.Contains(result.Probes[0].Observed, "xY") {
+		t.Fatalf("command evidence leaked boundary marker: %q", result.Probes[0].Observed)
+	}
+}
+
+func TestProbeCommandRedactionBoundaryHelper(t *testing.T) {
+	isHelper := false
+	for _, argument := range os.Args {
+		if argument == "boundary-redact-helper" {
+			isHelper = true
+			break
+		}
+	}
+	if !isHelper {
+		t.Skip("helper process only")
+	}
+	if _, err := fmt.Fprint(os.Stdout, strings.Repeat("o", (16<<10)-2)+boundarySecretMarker); err != nil {
+		t.Fatalf("write stdout: %v", err)
+	}
+}
+
+func TestCommandDeadlineBoundsDescendantPipe(t *testing.T) {
+	t.Parallel()
+
+	executable, err := os.Executable()
+	if err != nil {
+		t.Fatalf("executable: %v", err)
+	}
+	pidPath := t.TempDir() + "/descendant.pid"
+	configuration, err := probe.ParseConfig(strings.NewReader(fmt.Sprintf(`{
+  "schema_version":"rehearse.probes/v1",
+  "probes":[{
+    "ordinal":1,"id":"deadline-command","kind":"command","required":true,
+    "retry":{"deadline":"20ms","backoff":"10ms","max_attempts":1},
+    "command":{"executable":%q,"args":["-test.run=TestProbeCommandDeadlineHelper","--","deadline-helper",%q],"expected_exit_code":0,"trust_acknowledged":true}
+  }]
+}`, executable, pidPath)))
 	if err != nil {
 		t.Fatalf("ParseConfig: %v", err)
 	}
@@ -131,10 +178,28 @@ func TestCommandDeadlineBoundsDescendantPipe(t *testing.T) {
 	if result.Probes[0].Status != probe.StatusTimedOut {
 		t.Fatalf("command evidence = %#v", result.Probes[0])
 	}
+	contents, err := os.ReadFile(pidPath)
+	if err != nil {
+		t.Fatalf("read descendant PID: %v", err)
+	}
+	pid, err := strconv.Atoi(string(contents))
+	if err != nil {
+		t.Fatalf("parse descendant PID: %v", err)
+	}
+	if err := syscall.Kill(pid, 0); err == nil {
+		t.Fatalf("command descendant %d still running after deadline", pid)
+	}
 }
 
 func TestProbeCommandDeadlineHelper(t *testing.T) {
-	if len(os.Args) < 2 || os.Args[len(os.Args)-1] != "deadline-helper" {
+	index := -1
+	for offset, argument := range os.Args {
+		if argument == "deadline-helper" {
+			index = offset
+			break
+		}
+	}
+	if index < 0 || index+1 >= len(os.Args) {
 		t.Skip("helper process only")
 	}
 	child := exec.Command("/bin/sh", "-c", "sleep 1")
@@ -142,6 +207,9 @@ func TestProbeCommandDeadlineHelper(t *testing.T) {
 	child.Stderr = os.Stderr
 	if err := child.Start(); err != nil {
 		t.Fatalf("start descendant: %v", err)
+	}
+	if err := os.WriteFile(os.Args[index+1], []byte(strconv.Itoa(child.Process.Pid)), 0o600); err != nil {
+		t.Fatalf("write descendant PID: %v", err)
 	}
 	time.Sleep(time.Second)
 }

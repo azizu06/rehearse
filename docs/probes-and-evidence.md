@@ -40,8 +40,8 @@ evidence without changing an otherwise successful run outcome.
 
 Command arguments, SQL statements, URLs, expected values, and connection IDs are
 persisted plan configuration and therefore must never contain secret values.
-Secrets remain out-of-band. Free-form evidence is bounded first and then passed
-through an in-memory literal-marker redactor.
+Secrets remain out-of-band. Free-form evidence uses redactor-aware bounded
+capture so a secret marker cannot be split at an output boundary.
 
 ## Report rules
 
@@ -55,7 +55,8 @@ RFC3339 timestamps, and integer nanosecond durations. The persistence boundary
 reapplies redaction before writing the immutable SQLite document, and the local
 HTTP API reapplies redaction before returning it. JUnit export and historical
 report UI are intentionally outside this contract. A report document is capped
-at 4 MiB, which accommodates every valid maximum probe-evidence set.
+at 20 MiB, which accommodates every valid maximum probe-evidence set after JSON
+escaping.
 
 The real PostgreSQL verification is available through:
 
