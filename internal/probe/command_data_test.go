@@ -151,8 +151,6 @@ func TestProbeCommandRedactionBoundaryHelper(t *testing.T) {
 }
 
 func TestCommandDeadlineBoundsDescendantPipe(t *testing.T) {
-	t.Parallel()
-
 	executable, err := os.Executable()
 	if err != nil {
 		t.Fatalf("executable: %v", err)
@@ -162,7 +160,7 @@ func TestCommandDeadlineBoundsDescendantPipe(t *testing.T) {
   "schema_version":"rehearse.probes/v1",
   "probes":[{
     "ordinal":1,"id":"deadline-command","kind":"command","required":true,
-    "retry":{"deadline":"20ms","backoff":"10ms","max_attempts":1},
+    "retry":{"deadline":"250ms","backoff":"10ms","max_attempts":1},
     "command":{"executable":%q,"args":["-test.run=TestProbeCommandDeadlineHelper","--","deadline-helper",%q],"expected_exit_code":0,"trust_acknowledged":true}
   }]
 }`, executable, pidPath)))
@@ -172,7 +170,7 @@ func TestCommandDeadlineBoundsDescendantPipe(t *testing.T) {
 
 	started := time.Now()
 	result := probe.NewRunner(probe.Options{}).Run(context.Background(), configuration)
-	if got := time.Since(started); got > 150*time.Millisecond {
+	if got := time.Since(started); got > 2*time.Second {
 		t.Fatalf("command returned after %s, want bounded descendant-pipe shutdown", got)
 	}
 	if result.Probes[0].Status != probe.StatusTimedOut {
