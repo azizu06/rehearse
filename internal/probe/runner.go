@@ -168,7 +168,11 @@ func (runner *Runner) runSQL(parent context.Context, spec Spec) Evidence {
 		if err != nil {
 			return "", err
 		}
-		defer func() { _ = transaction.Rollback(context.Background()) }()
+		defer func() {
+			cleanup, cancel := context.WithTimeout(context.Background(), time.Second)
+			defer cancel()
+			_ = transaction.Rollback(cleanup)
+		}()
 
 		remaining := spec.Retry.Deadline
 		if deadline, ok := ctx.Deadline(); ok {
@@ -206,6 +210,7 @@ func (runner *Runner) runSQL(parent context.Context, spec Spec) Evidence {
 const (
 	maxObservedBytes = 16 << 10
 	maxDataBytes     = 1 << 20
+	commandWaitDelay = 50 * time.Millisecond
 )
 
 type cappedBuffer struct {
@@ -236,6 +241,7 @@ func (runner *Runner) runCommand(parent context.Context, spec Spec) Evidence {
 		stdout = cappedBuffer{limit: maxObservedBytes}
 		stderr = cappedBuffer{limit: maxObservedBytes}
 		command := exec.CommandContext(ctx, spec.Command.Executable, spec.Command.Args...)
+		command.WaitDelay = commandWaitDelay
 		command.Env = []string{"LANG=C", "LC_ALL=C", "PATH=/usr/bin:/bin"}
 		command.Dir = "/"
 		command.Stdout = &stdout
@@ -266,7 +272,10 @@ func commandOutput(stdout, stderr cappedBuffer) string {
 }
 
 func (runner *Runner) runData(parent context.Context, spec Spec) Evidence {
-	return runner.runAttempts(parent, spec, func(context.Context) (string, error) {
+	return runner.runAttempts(parent, spec, func(ctx context.Context) (string, error) {
+		if err := ctx.Err(); err != nil {
+			return "", err
+		}
 		if !filepath.IsAbs(runner.dataRoot) || filepath.Clean(runner.dataRoot) == string(os.PathSeparator) {
 			return "", errors.New("data assertion root must be a non-root absolute path")
 		}
@@ -281,12 +290,19 @@ func (runner *Runner) runData(parent context.Context, spec Spec) Evidence {
 		if candidate != root && !strings.HasPrefix(candidate, root+string(os.PathSeparator)) {
 			return "", errors.New("data assertion path escapes restored root")
 		}
+		info, err := os.Lstat(candidate)
+		if err != nil {
+			return "", err
+		}
+		if !info.Mode().IsRegular() || info.Size() > maxDataBytes {
+			return "", errors.New("data assertion file exceeds safe bounds")
+		}
 		file, err := os.Open(candidate)
 		if err != nil {
 			return "", err
 		}
 		defer func() { _ = file.Close() }()
-		info, err := file.Stat()
+		info, err = file.Stat()
 		if err != nil {
 			return "", err
 		}
@@ -357,11 +373,15 @@ func (runner *Runner) runAttempts(parent context.Context, spec Spec, attempt fun
 		observed, err := attempt(ctx)
 		if err == nil {
 			evidence.Status = StatusPassed
-			evidence.Observed, evidence.Truncated = boundText(runner.redactor.String(observed), 33<<10, evidence.Truncated)
+			evidence.Observed, evidence.Truncated = boundText(observed, 33<<10, evidence.Truncated)
+			evidence.Observed = runner.redactor.String(evidence.Observed)
+			evidence.Observed, evidence.Truncated = boundText(evidence.Observed, 33<<10, evidence.Truncated)
 			break
 		}
 		if err != nil {
-			evidence.Detail, evidence.Truncated = boundText(runner.redactor.String(err.Error()), maxObservedBytes, evidence.Truncated)
+			evidence.Detail, evidence.Truncated = boundText(err.Error(), maxObservedBytes, evidence.Truncated)
+			evidence.Detail = runner.redactor.String(evidence.Detail)
+			evidence.Detail, evidence.Truncated = boundText(evidence.Detail, maxObservedBytes, evidence.Truncated)
 		}
 		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
 			evidence.ExhaustedBy = ExhaustedDeadline

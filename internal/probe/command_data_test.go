@@ -5,8 +5,10 @@ import (
 	"crypto/sha256"
 	"fmt"
 	"os"
+	"os/exec"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/azizu06/rehearse/internal/probe"
 	"github.com/azizu06/rehearse/internal/redact"
@@ -100,4 +102,46 @@ func TestProbeCommandHelper(t *testing.T) {
 	if _, err := fmt.Fprint(os.Stderr, strings.Repeat("e", 20<<10)); err != nil {
 		t.Fatalf("write stderr: %v", err)
 	}
+}
+
+func TestCommandDeadlineBoundsDescendantPipe(t *testing.T) {
+	t.Parallel()
+
+	executable, err := os.Executable()
+	if err != nil {
+		t.Fatalf("executable: %v", err)
+	}
+	configuration, err := probe.ParseConfig(strings.NewReader(fmt.Sprintf(`{
+  "schema_version":"rehearse.probes/v1",
+  "probes":[{
+    "ordinal":1,"id":"deadline-command","kind":"command","required":true,
+    "retry":{"deadline":"20ms","backoff":"10ms","max_attempts":1},
+    "command":{"executable":%q,"args":["-test.run=TestProbeCommandDeadlineHelper","--","deadline-helper"],"expected_exit_code":0,"trust_acknowledged":true}
+  }]
+}`, executable)))
+	if err != nil {
+		t.Fatalf("ParseConfig: %v", err)
+	}
+
+	started := time.Now()
+	result := probe.NewRunner(probe.Options{}).Run(context.Background(), configuration)
+	if got := time.Since(started); got > 150*time.Millisecond {
+		t.Fatalf("command returned after %s, want bounded descendant-pipe shutdown", got)
+	}
+	if result.Probes[0].Status != probe.StatusTimedOut {
+		t.Fatalf("command evidence = %#v", result.Probes[0])
+	}
+}
+
+func TestProbeCommandDeadlineHelper(t *testing.T) {
+	if len(os.Args) < 2 || os.Args[len(os.Args)-1] != "deadline-helper" {
+		t.Skip("helper process only")
+	}
+	child := exec.Command("/bin/sh", "-c", "sleep 1")
+	child.Stdout = os.Stdout
+	child.Stderr = os.Stderr
+	if err := child.Start(); err != nil {
+		t.Fatalf("start descendant: %v", err)
+	}
+	time.Sleep(time.Second)
 }

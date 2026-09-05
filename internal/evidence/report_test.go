@@ -3,6 +3,8 @@ package evidence_test
 import (
 	"bytes"
 	"errors"
+	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -60,6 +62,28 @@ func TestCanonicalReportPreservesContiguousSemanticOrder(t *testing.T) {
 	}
 	if err := report.Validate(); !errors.Is(err, evidence.ErrInvalidReport) {
 		t.Fatalf("contradictory stage order error = %v, want ErrInvalidReport", err)
+	}
+}
+
+func TestParseJSONAcceptsMaximumBoundedProbeEvidence(t *testing.T) {
+	t.Parallel()
+
+	report := validReport()
+	report.Probes = make([]probe.Evidence, 64)
+	for index := range report.Probes {
+		report.Probes[index] = probe.Evidence{
+			Ordinal: index + 1, ID: fmt.Sprintf("probe-%d", index+1), Kind: probe.KindCommand,
+			Required: true, Status: probe.StatusPassed, Attempts: 1,
+			StartedAt: report.Stages[0].StartedAt, FinishedAt: report.Stages[0].FinishedAt, Duration: time.Second,
+			Observed: strings.Repeat("x", 33<<10),
+		}
+	}
+	encoded, err := report.CanonicalJSON(redact.Redactor{})
+	if err != nil {
+		t.Fatalf("CanonicalJSON: %v", err)
+	}
+	if _, err := evidence.ParseJSON(encoded); err != nil {
+		t.Fatalf("ParseJSON rejected valid bounded report: %v", err)
 	}
 }
 

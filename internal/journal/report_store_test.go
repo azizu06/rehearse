@@ -3,6 +3,7 @@ package journal_test
 import (
 	"bytes"
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -69,6 +70,12 @@ func TestTypedProbeConfigAndRedactedReportSurviveRestart(t *testing.T) {
 		Stages:        []evidence.Stage{{Ordinal: 1, Name: drill.StageProbe, StartedAt: startedAt.Add(5 * time.Second), FinishedAt: startedAt.Add(6 * time.Second), Duration: time.Second}},
 		Probes:        []probe.Evidence{{Ordinal: 1, ID: "trusted-check", Kind: probe.KindCommand, Required: true, Status: probe.StatusPassed, Attempts: 1, StartedAt: startedAt.Add(5 * time.Second), FinishedAt: startedAt.Add(6 * time.Second), Duration: time.Second, Observed: secret, TrustedHostCommand: true}},
 		Outcome:       run.Outcome, Cleanup: run.Cleanup,
+	}
+	forged := report
+	forged.Probes = append([]probe.Evidence(nil), report.Probes...)
+	forged.Probes[0].Required = false
+	if err := store.SaveReport(ctx, forged, redact.New(secret)); !errors.Is(err, evidence.ErrInvalidReport) {
+		t.Fatalf("SaveReport accepted evidence that hid a required probe: %v", err)
 	}
 	if err := store.SaveReport(ctx, report, redact.New(secret)); err != nil {
 		t.Fatalf("SaveReport: %v", err)

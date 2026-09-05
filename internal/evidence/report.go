@@ -16,7 +16,10 @@ import (
 	"github.com/azizu06/rehearse/internal/redact"
 )
 
-const SchemaVersion = "rehearse.report/v1"
+const (
+	SchemaVersion  = "rehearse.report/v1"
+	maxReportBytes = 4 << 20
+)
 
 var ErrInvalidReport = errors.New("invalid evidence report")
 
@@ -165,7 +168,7 @@ func validProbeStatus(status probe.Status) bool {
 
 // ParseJSON strictly decodes one persisted report and revalidates its schema.
 func ParseJSON(contents []byte) (Report, error) {
-	if len(contents) == 0 || len(contents) > 1<<20 {
+	if len(contents) == 0 || len(contents) > maxReportBytes {
 		return Report{}, ErrInvalidReport
 	}
 	decoder := json.NewDecoder(bytes.NewReader(contents))

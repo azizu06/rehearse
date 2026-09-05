@@ -54,7 +54,8 @@ Canonical JSON sorts only by those semantic ordinals and uses typed structs, UTC
 RFC3339 timestamps, and integer nanosecond durations. The persistence boundary
 reapplies redaction before writing the immutable SQLite document, and the local
 HTTP API reapplies redaction before returning it. JUnit export and historical
-report UI are intentionally outside this contract.
+report UI are intentionally outside this contract. A report document is capped
+at 4 MiB, which accommodates every valid maximum probe-evidence set.
 
 The real PostgreSQL verification is available through:
 

@@ -28,7 +28,11 @@ func New(markers ...string) Redactor {
 		result.markers = append(result.markers, marker)
 	}
 	sort.Slice(result.markers, func(left, right int) bool {
-		return len(result.markers[left]) > len(result.markers[right])
+		leftMarker, rightMarker := result.markers[left], result.markers[right]
+		if len(leftMarker) == len(rightMarker) {
+			return leftMarker < rightMarker
+		}
+		return len(leftMarker) > len(rightMarker)
 	})
 	return result
 }

@@ -5,8 +5,10 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"sort"
 
 	"github.com/azizu06/rehearse/internal/evidence"
+	"github.com/azizu06/rehearse/internal/probe"
 	"github.com/azizu06/rehearse/internal/redact"
 )
 
@@ -28,11 +30,33 @@ func (store *Store) SaveReport(ctx context.Context, report evidence.Report, reda
 	if !run.Terminal() || run.PlanID != sanitized.PlanID || run.PlanVersion != sanitized.PlanVersion || run.Outcome != sanitized.Outcome || run.Cleanup != sanitized.Cleanup {
 		return fmt.Errorf("%w: report disagrees with terminal run", evidence.ErrInvalidReport)
 	}
+	plan, err := store.Plan(ctx, run.PlanID, run.PlanVersion)
+	if err != nil {
+		return err
+	}
+	if err := validateProbeEvidence(plan.Spec.ProbeConfig, sanitized.Probes); err != nil {
+		return err
+	}
 	if _, err := store.database.ExecContext(ctx, `
 		INSERT INTO run_reports(run_id, schema_version, document, created_at)
 		VALUES (?, ?, ?, ?)
 	`, sanitized.RunID, sanitized.SchemaVersion, string(encoded), formatTime(run.UpdatedAt)); err != nil {
 		return fmt.Errorf("insert run report: %w", err)
+	}
+	return nil
+}
+
+func validateProbeEvidence(config probe.Config, items []probe.Evidence) error {
+	if config.IsZero() || len(config.Probes) != len(items) {
+		return fmt.Errorf("%w: report probe evidence disagrees with plan", evidence.ErrInvalidReport)
+	}
+	declared := append([]probe.Spec(nil), config.Probes...)
+	sort.Slice(declared, func(left, right int) bool { return declared[left].Ordinal < declared[right].Ordinal })
+	for index, item := range items {
+		spec := declared[index]
+		if item.Ordinal != spec.Ordinal || item.ID != spec.ID || item.Kind != spec.Kind || item.Required != spec.Required {
+			return fmt.Errorf("%w: report probe evidence disagrees with plan", evidence.ErrInvalidReport)
+		}
 	}
 	return nil
 }
