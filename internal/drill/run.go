@@ -170,8 +170,34 @@ func (run *Run) RecordCleanup(status CleanupStatus, at time.Time) (Event, error)
 		return Event{}, err
 	}
 	run.Cleanup = status
-	run.advance(at)
+	run.Version++
+	run.UpdatedAt = at.UTC()
+	if status == CleanupFailed {
+		run.NeedsReconciliation = true
+		run.ReconciliationRequestedAt = at.UTC()
+	} else {
+		run.NeedsReconciliation = false
+		run.ReconciliationRequestedAt = time.Time{}
+	}
 	return run.event(kind, at), nil
+}
+
+// BeginCleanupRetry reopens only the cleanup dimension after a prior failed
+// attempt. Execution outcome remains immutable while startup reconciliation
+// continues to own the abandoned resources.
+func (run *Run) BeginCleanupRetry(at time.Time) (Event, error) {
+	if run.Stage != StageCleanup || run.Outcome == "" || run.Cleanup != CleanupFailed {
+		return Event{}, ErrInvalidReconciliation
+	}
+	if err := run.validateTimestamp(at); err != nil {
+		return Event{}, err
+	}
+	run.Cleanup = CleanupPending
+	run.NeedsReconciliation = true
+	run.ReconciliationRequestedAt = at.UTC()
+	run.Version++
+	run.UpdatedAt = at.UTC()
+	return run.event(EventReconciliationRequired, at), nil
 }
 
 // RequireReconciliation marks a non-terminal run when a persisted process is

@@ -5,6 +5,7 @@ package journal
 import (
 	"context"
 	"database/sql"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -12,6 +13,7 @@ import (
 	"time"
 
 	"github.com/azizu06/rehearse/internal/drill"
+	"github.com/azizu06/rehearse/internal/sandboxid"
 	_ "modernc.org/sqlite"
 )
 
@@ -20,13 +22,22 @@ var (
 	ErrNotFound = errors.New("journal record not found")
 	// ErrConcurrentMutation identifies a stale projection write.
 	ErrConcurrentMutation = errors.New("run changed concurrently")
+	// ErrSandboxClaimed identifies a run whose one sandbox lifecycle is already owned.
+	ErrSandboxClaimed = errors.New("sandbox cleanup already claimed")
+	// ErrSandboxResourceClaimed identifies a duplicate expected sandbox resource.
+	ErrSandboxResourceClaimed = errors.New("sandbox cleanup resource already claimed")
+	// ErrCorruptSandboxClaim identifies unsafe durable cleanup ownership state.
+	ErrCorruptSandboxClaim = sandboxid.ErrCorruptManifest
+	// ErrJournalOwned identifies a journal already held by another live runtime.
+	ErrJournalOwned = errors.New("journal is already owned by another runtime")
 )
 
 // Store owns one SQLite connection pool. A single open connection serializes
 // state-machine writes while still allowing callers to invoke Store safely from
 // concurrent goroutines.
 type Store struct {
-	database *sql.DB
+	database  *sql.DB
+	ownership *journalOwnership
 }
 
 // Open opens or creates a journal, applies embedded migrations, and marks any
@@ -35,16 +46,24 @@ func Open(ctx context.Context, path string) (*Store, error) {
 	if strings.TrimSpace(path) == "" {
 		return nil, errors.New("journal path is required")
 	}
-	database, err := sql.Open("sqlite", path)
+	canonicalPath, err := canonicalJournalPath(path)
 	if err != nil {
+		return nil, err
+	}
+	ownership, err := acquireJournalOwnership(canonicalPath)
+	if err != nil {
+		return nil, err
+	}
+	database, err := sql.Open("sqlite", canonicalPath)
+	if err != nil {
+		_ = ownership.release()
 		return nil, fmt.Errorf("open sqlite journal: %w", err)
 	}
 	database.SetMaxOpenConns(1)
 	database.SetMaxIdleConns(1)
 
 	closeWithError := func(cause error) (*Store, error) {
-		_ = database.Close()
-		return nil, cause
+		return nil, errors.Join(cause, database.Close(), ownership.release())
 	}
 	for _, pragma := range []string{
 		"PRAGMA foreign_keys = ON",
@@ -58,7 +77,7 @@ func Open(ctx context.Context, path string) (*Store, error) {
 	if err := applyMigrations(ctx, database); err != nil {
 		return closeWithError(err)
 	}
-	store := &Store{database: database}
+	store := &Store{database: database, ownership: ownership}
 	if err := store.requireRestartReconciliation(ctx, time.Now().UTC()); err != nil {
 		return closeWithError(err)
 	}
@@ -67,7 +86,7 @@ func Open(ctx context.Context, path string) (*Store, error) {
 
 // Close closes the SQLite journal.
 func (store *Store) Close() error {
-	return store.database.Close()
+	return errors.Join(store.database.Close(), store.ownership.release())
 }
 
 // SchemaVersion returns the newest applied migration version.
@@ -200,6 +219,173 @@ func (store *Store) Run(ctx context.Context, id string) (drill.Run, error) {
 	return loadRun(ctx, store.database, id)
 }
 
+// ClaimSandboxCleanup durably establishes cleanup ownership before Docker can
+// create resources for one run.
+func (store *Store) ClaimSandboxCleanup(ctx context.Context, id, claimID string, at time.Time) error {
+	if at.IsZero() || !validSandboxClaimID(claimID) {
+		return drill.ErrInvalidRun
+	}
+	transaction, err := store.database.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin sandbox cleanup claim: %w", err)
+	}
+	defer func() { _ = transaction.Rollback() }()
+	run, err := loadRun(ctx, transaction, id)
+	if err != nil {
+		return err
+	}
+	if run.Stage == drill.StageCleanup || run.Outcome != "" || run.Cleanup != drill.CleanupNotStarted || run.NeedsReconciliation || !run.ReconciliationRequestedAt.IsZero() {
+		return drill.ErrInvalidRun
+	}
+	if _, err := transaction.ExecContext(ctx, `
+		INSERT INTO sandbox_cleanup_claims(run_id, claim_id, status, claimed_at, updated_at)
+		VALUES (?, ?, 'pending', ?, ?)
+	`, id, claimID, formatTime(at), formatTime(at)); err != nil {
+		if strings.Contains(err.Error(), "UNIQUE constraint failed") {
+			return ErrSandboxClaimed
+		}
+		return fmt.Errorf("claim sandbox cleanup: %w", err)
+	}
+	if err := transaction.Commit(); err != nil {
+		return fmt.Errorf("commit sandbox cleanup claim: %w", err)
+	}
+	return nil
+}
+
+// AppendSandboxCleanupResource durably records one expected resource before creation.
+func (store *Store) AppendSandboxCleanupResource(ctx context.Context, id, claimID string, resource drill.SandboxResourceClaim, at time.Time) error {
+	if at.IsZero() || !validSandboxClaimID(claimID) || !validSandboxClaimID(resource.Generation) {
+		return drill.ErrInvalidRun
+	}
+	transaction, err := store.database.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin sandbox resource claim: %w", err)
+	}
+	defer func() { _ = transaction.Rollback() }()
+	var storedClaimID, status string
+	err = transaction.QueryRowContext(ctx, `
+		SELECT claim_id, status
+		FROM sandbox_cleanup_claims
+		WHERE run_id = ?
+	`, id).Scan(&storedClaimID, &status)
+	if errors.Is(err, sql.ErrNoRows) {
+		return ErrNotFound
+	}
+	if err != nil {
+		return fmt.Errorf("load sandbox cleanup claim for resource: %w", err)
+	}
+	if !validSandboxClaimID(storedClaimID) {
+		return ErrCorruptSandboxClaim
+	}
+	if storedClaimID != claimID || status != "pending" {
+		return ErrSandboxClaimed
+	}
+	if !validSandboxResourceClaim(id, resource) {
+		return ErrCorruptSandboxClaim
+	}
+	if _, err := transaction.ExecContext(ctx, `
+		INSERT INTO sandbox_cleanup_resources(
+			run_id, claim_id, kind, name, generation_id, expected_at
+		) VALUES (?, ?, ?, ?, ?, ?)
+	`, id, claimID, resource.Kind, resource.Name, resource.Generation, formatTime(at)); err != nil {
+		if strings.Contains(err.Error(), "UNIQUE constraint failed") {
+			return ErrSandboxResourceClaimed
+		}
+		return fmt.Errorf("append sandbox cleanup resource: %w", err)
+	}
+	if err := transaction.Commit(); err != nil {
+		return fmt.Errorf("commit sandbox resource claim: %w", err)
+	}
+	return nil
+}
+
+// SandboxCleanupClaim returns the active deletion authority and expected resources.
+func (store *Store) SandboxCleanupClaim(ctx context.Context, id string) (string, []drill.SandboxResourceClaim, bool, error) {
+	transaction, err := store.database.BeginTx(ctx, nil)
+	if err != nil {
+		return "", nil, false, fmt.Errorf("begin sandbox cleanup claim read: %w", err)
+	}
+	defer func() { _ = transaction.Rollback() }()
+	var claimID string
+	err = transaction.QueryRowContext(ctx, `
+		SELECT claim_id
+		FROM sandbox_cleanup_claims
+		WHERE run_id = ? AND status IN ('pending', 'failed')
+	`, id).Scan(&claimID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", nil, false, nil
+	}
+	if err != nil {
+		return "", nil, false, fmt.Errorf("load sandbox cleanup claim: %w", err)
+	}
+	if !validSandboxClaimID(claimID) {
+		return "", nil, false, ErrCorruptSandboxClaim
+	}
+	rows, err := transaction.QueryContext(ctx, `
+		SELECT kind, name, generation_id
+		FROM sandbox_cleanup_resources
+		WHERE run_id = ? AND claim_id = ?
+		ORDER BY kind, name
+	`, id, claimID)
+	if err != nil {
+		return "", nil, false, fmt.Errorf("load sandbox cleanup manifest: %w", err)
+	}
+	var resources []drill.SandboxResourceClaim
+	for rows.Next() {
+		var resource drill.SandboxResourceClaim
+		if err := rows.Scan(&resource.Kind, &resource.Name, &resource.Generation); err != nil {
+			return "", nil, false, fmt.Errorf("scan sandbox cleanup manifest: %w", err)
+		}
+		if !validSandboxResourceClaim(id, resource) {
+			return "", nil, false, ErrCorruptSandboxClaim
+		}
+		resources = append(resources, resource)
+	}
+	if err := rows.Err(); err != nil {
+		_ = rows.Close()
+		return "", nil, false, fmt.Errorf("iterate sandbox cleanup manifest: %w", err)
+	}
+	if err := rows.Close(); err != nil {
+		return "", nil, false, fmt.Errorf("close sandbox cleanup manifest: %w", err)
+	}
+	if err := transaction.Commit(); err != nil {
+		return "", nil, false, fmt.Errorf("commit sandbox cleanup claim read: %w", err)
+	}
+	return claimID, resources, true, nil
+}
+
+func validSandboxClaimID(claimID string) bool {
+	decoded, err := hex.DecodeString(claimID)
+	return err == nil && len(decoded) == 32 && claimID == strings.ToLower(claimID)
+}
+
+func validSandboxResourceClaim(runID string, resource drill.SandboxResourceClaim) bool {
+	return validSandboxClaimID(resource.Generation) && sandboxid.ValidateResourceName(runID, resource.Kind, resource.Name) == nil
+}
+
+// RecordSandboxCleanup closes or preserves the durable sandbox cleanup claim.
+func (store *Store) RecordSandboxCleanup(ctx context.Context, id string, status drill.CleanupStatus, at time.Time) error {
+	if at.IsZero() || (status != drill.CleanupSucceeded && status != drill.CleanupFailed) {
+		return drill.ErrInvalidCleanup
+	}
+	result, err := store.database.ExecContext(ctx, `
+        UPDATE sandbox_cleanup_claims
+        SET status = ?, updated_at = ?
+        WHERE run_id = ?
+    `, status, formatTime(at), id)
+	if err != nil {
+		return fmt.Errorf("record sandbox cleanup claim: %w", err)
+	}
+	rowsAffected, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("inspect sandbox cleanup claim: %w", err)
+	}
+	if rowsAffected != 1 {
+		return ErrNotFound
+	}
+	return nil
+}
+
 // Transition advances a run by one deterministic stage and appends its event.
 func (store *Store) Transition(ctx context.Context, id string, stage drill.Stage, at time.Time) (drill.Run, error) {
 	return store.mutateRun(ctx, id, func(run *drill.Run) (drill.Event, error) {
@@ -216,9 +402,73 @@ func (store *Store) RecordOutcome(ctx context.Context, id string, outcome drill.
 
 // RecordCleanup persists the final independent cleanup result.
 func (store *Store) RecordCleanup(ctx context.Context, id string, status drill.CleanupStatus, at time.Time) (drill.Run, error) {
-	return store.mutateRun(ctx, id, func(run *drill.Run) (drill.Event, error) {
+	return store.mutateRunWith(ctx, id, func(run *drill.Run) (drill.Event, error) {
 		return run.RecordCleanup(status, at)
+	}, func(transaction *sql.Tx) error {
+		_, err := transaction.ExecContext(ctx, `
+            UPDATE sandbox_cleanup_claims
+            SET status = ?, updated_at = ?
+            WHERE run_id = ?
+        `, status, formatTime(at), id)
+		return err
 	})
+}
+
+// BeginCleanupRetry moves a failed cleanup back to pending while preserving
+// the execution outcome and durable reconciliation ownership.
+func (store *Store) BeginCleanupRetry(ctx context.Context, id string, at time.Time) (drill.Run, error) {
+	return store.mutateRunWith(ctx, id, func(run *drill.Run) (drill.Event, error) {
+		return run.BeginCleanupRetry(at)
+	}, func(transaction *sql.Tx) error {
+		_, err := transaction.ExecContext(ctx, `
+            UPDATE sandbox_cleanup_claims
+            SET status = 'pending', updated_at = ?
+            WHERE run_id = ? AND status = 'failed'
+        `, formatTime(at), id)
+		return err
+	})
+}
+
+// RunsNeedingReconciliation returns the durable startup janitor queue.
+func (store *Store) RunsNeedingReconciliation(ctx context.Context) ([]drill.Run, error) {
+	rows, err := store.database.QueryContext(ctx, `
+        SELECT id, plan_id, plan_version, stage, outcome, cleanup_status,
+               created_at, updated_at, version, needs_reconciliation,
+               reconciliation_requested_at
+        FROM runs
+        WHERE (
+               needs_reconciliation = 1
+               OR cleanup_status IN ('pending', 'failed')
+               OR EXISTS (
+                   SELECT 1 FROM sandbox_cleanup_claims
+                   WHERE sandbox_cleanup_claims.run_id = runs.id
+                     AND sandbox_cleanup_claims.status = 'failed'
+               )
+           )
+          AND NOT EXISTS (
+              SELECT 1 FROM sandbox_cleanup_claims
+              WHERE sandbox_cleanup_claims.run_id = runs.id
+                AND sandbox_cleanup_claims.status = 'pending'
+          )
+        ORDER BY id
+    `)
+	if err != nil {
+		return nil, fmt.Errorf("query reconciliation queue: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	var runs []drill.Run
+	for rows.Next() {
+		run, err := scanRun(rows)
+		if err != nil {
+			return nil, err
+		}
+		runs = append(runs, run)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate reconciliation queue: %w", err)
+	}
+	return runs, nil
 }
 
 // Events returns the immutable run history in sequence order.
@@ -259,6 +509,15 @@ func (store *Store) mutateRun(
 	ctx context.Context,
 	id string,
 	mutation func(*drill.Run) (drill.Event, error),
+) (drill.Run, error) {
+	return store.mutateRunWith(ctx, id, mutation, nil)
+}
+
+func (store *Store) mutateRunWith(
+	ctx context.Context,
+	id string,
+	mutation func(*drill.Run) (drill.Event, error),
+	afterMutation func(*sql.Tx) error,
 ) (drill.Run, error) {
 	transaction, err := store.database.BeginTx(ctx, nil)
 	if err != nil {
@@ -304,6 +563,11 @@ func (store *Store) mutateRun(
 	if err := insertEvent(ctx, transaction, run.ID, event); err != nil {
 		return drill.Run{}, err
 	}
+	if afterMutation != nil {
+		if err := afterMutation(transaction); err != nil {
+			return drill.Run{}, fmt.Errorf("update sandbox cleanup claim: %w", err)
+		}
+	}
 	if err := transaction.Commit(); err != nil {
 		return drill.Run{}, fmt.Errorf("commit run mutation: %w", err)
 	}
@@ -316,13 +580,20 @@ func (store *Store) requireRestartReconciliation(ctx context.Context, at time.Ti
 		return fmt.Errorf("begin restart reconciliation: %w", err)
 	}
 	defer func() { _ = transaction.Rollback() }()
+	if _, err := transaction.ExecContext(ctx, `
+        UPDATE sandbox_cleanup_claims
+        SET status = 'failed', updated_at = ?
+        WHERE status = 'pending'
+    `, formatTime(at)); err != nil {
+		return fmt.Errorf("activate interrupted sandbox cleanup claims: %w", err)
+	}
 
 	rows, err := transaction.QueryContext(ctx, `
         SELECT id, plan_id, plan_version, stage, outcome, cleanup_status,
                created_at, updated_at, version, needs_reconciliation,
                reconciliation_requested_at
         FROM runs
-        WHERE cleanup_status NOT IN ('succeeded', 'failed')
+        WHERE cleanup_status != 'succeeded'
           AND needs_reconciliation = 0
         ORDER BY id
     `)
@@ -352,16 +623,21 @@ func (store *Store) requireRestartReconciliation(ctx context.Context, at time.Ti
 			eventAt = run.UpdatedAt
 		}
 		previousVersion := run.Version
-		event, err := run.RequireReconciliation(eventAt)
+		var event drill.Event
+		if run.Cleanup == drill.CleanupFailed {
+			event, err = run.BeginCleanupRetry(eventAt)
+		} else {
+			event, err = run.RequireReconciliation(eventAt)
+		}
 		if err != nil {
 			return fmt.Errorf("mark run %s for reconciliation: %w", run.ID, err)
 		}
 		result, err := transaction.ExecContext(ctx, `
             UPDATE runs
-            SET updated_at = ?, version = ?, needs_reconciliation = 1,
+            SET cleanup_status = ?, updated_at = ?, version = ?, needs_reconciliation = 1,
                 reconciliation_requested_at = ?
             WHERE id = ? AND version = ? AND needs_reconciliation = 0
-        `, formatTime(run.UpdatedAt), run.Version, formatTime(run.ReconciliationRequestedAt), run.ID, previousVersion)
+        `, run.Cleanup, formatTime(run.UpdatedAt), run.Version, formatTime(run.ReconciliationRequestedAt), run.ID, previousVersion)
 		if err != nil {
 			return fmt.Errorf("update restart reconciliation: %w", err)
 		}

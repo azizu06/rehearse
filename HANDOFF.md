@@ -2,7 +2,7 @@
 
 ## Current state
 
-See the [README project status](README.md) for the shipped repository surface. GitHub Issues and the project board define the implementation order and current status.
+Rehearse has an approved product definition, a tested Go/React tracer bullet, a durable SQLite journal, a bounded Docker Compose sandbox with startup cleanup, and a read-only restic source adapter. See the [README project status](README.md) for the shipped repository surface. GitHub Issues and the project board define the implementation order and current status.
 
 ## Next implementation task
 

@@ -1,0 +1,117 @@
+package sandbox
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"time"
+
+	"github.com/azizu06/rehearse/internal/drill"
+)
+
+// ReconciliationStore is the Issue #6 durable queue consumed at startup.
+type ReconciliationStore interface {
+	RunsNeedingReconciliation(context.Context) ([]drill.Run, error)
+	SandboxCleanupClaim(context.Context, string) (string, []drill.SandboxResourceClaim, bool, error)
+	RecordOutcome(context.Context, string, drill.Outcome, time.Time) (drill.Run, error)
+	BeginCleanupRetry(context.Context, string, time.Time) (drill.Run, error)
+	RecordCleanup(context.Context, string, drill.CleanupStatus, time.Time) (drill.Run, error)
+}
+
+// RunCleaner is implemented by the label-scoped Docker cleaner.
+type RunCleaner interface {
+	Cleanup(context.Context, string, string, []drill.SandboxResourceClaim) error
+}
+
+// JanitorOptions configure bounded startup reconciliation.
+type JanitorOptions struct {
+	CleanupTimeout time.Duration
+	Now            func() time.Time
+}
+
+// Janitor consumes durable reconciliation truth without scanning unrelated
+// Docker resources outside each run's durable ownership manifest.
+type Janitor struct {
+	store          ReconciliationStore
+	cleaner        RunCleaner
+	cleanupTimeout time.Duration
+	now            func() time.Time
+}
+
+// NewJanitor creates a startup janitor.
+func NewJanitor(store ReconciliationStore, cleaner RunCleaner, options JanitorOptions) *Janitor {
+	timeout := options.CleanupTimeout
+	if timeout <= 0 {
+		timeout = 30 * time.Second
+	}
+	now := options.Now
+	if now == nil {
+		now = time.Now
+	}
+	return &Janitor{store: store, cleaner: cleaner, cleanupTimeout: timeout, now: now}
+}
+
+// ReconcileStartup is the application-startup integration seam for Issue #11.
+func ReconcileStartup(ctx context.Context, store ReconciliationStore, cleaner RunCleaner, options JanitorOptions) error {
+	return NewJanitor(store, cleaner, options).Reconcile(ctx)
+}
+
+// Reconcile attempts every queued run and leaves failures durably retryable.
+func (janitor *Janitor) Reconcile(ctx context.Context) error {
+	if janitor.store == nil || janitor.cleaner == nil {
+		return errors.New("janitor store and cleaner are required")
+	}
+	runs, err := janitor.store.RunsNeedingReconciliation(ctx)
+	if err != nil {
+		return fmt.Errorf("load startup reconciliation queue: %w", err)
+	}
+	var reconciliationErrors []error
+	for _, queued := range runs {
+		run, prepareErr := janitor.prepare(ctx, queued)
+		if prepareErr != nil {
+			reconciliationErrors = append(reconciliationErrors, fmt.Errorf("prepare run %s cleanup retry: %w", queued.ID, prepareErr))
+			continue
+		}
+
+		claimID, resources, hasClaim, claimErr := janitor.store.SandboxCleanupClaim(ctx, run.ID)
+		var cleanupErr error
+		if claimErr != nil {
+			cleanupErr = claimErr
+		} else if hasClaim {
+			cleanupContext, cancel := context.WithTimeout(context.WithoutCancel(ctx), janitor.cleanupTimeout)
+			cleanupErr = janitor.cleaner.Cleanup(cleanupContext, run.ID, claimID, resources)
+			cancel()
+		}
+		status := drill.CleanupSucceeded
+		if cleanupErr != nil {
+			status = drill.CleanupFailed
+		}
+		recordContext, recordCancel := context.WithTimeout(context.WithoutCancel(ctx), janitor.cleanupTimeout)
+		_, recordErr := janitor.store.RecordCleanup(recordContext, run.ID, status, janitor.eventTime(run))
+		recordCancel()
+		if cleanupErr != nil || recordErr != nil {
+			reconciliationErrors = append(reconciliationErrors,
+				fmt.Errorf("reconcile run %s: %w", run.ID, errors.Join(cleanupErr, recordErr)))
+		}
+	}
+	return errors.Join(reconciliationErrors...)
+}
+
+func (janitor *Janitor) prepare(ctx context.Context, queued drill.Run) (drill.Run, error) {
+	at := janitor.eventTime(queued)
+	switch {
+	case queued.Outcome == "":
+		return janitor.store.RecordOutcome(ctx, queued.ID, drill.OutcomeFailed, at)
+	case queued.Cleanup == drill.CleanupFailed:
+		return janitor.store.BeginCleanupRetry(ctx, queued.ID, at)
+	}
+	return queued, nil
+}
+
+func (janitor *Janitor) eventTime(run drill.Run) time.Time {
+	at := janitor.now().UTC()
+	if at.Before(run.UpdatedAt) {
+		return run.UpdatedAt
+	}
+	return at
+}

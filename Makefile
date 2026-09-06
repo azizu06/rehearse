@@ -6,24 +6,25 @@ TRIVY ?= trivy
 TRIVY_VERSION := 0.72.0
 VERSION ?= dev
 RESTIC_TEST_BINARY ?= restic
-TEST_PARALLEL ?= 4
+TEST_PACKAGES ?= 2
+TEST_PARALLEL ?= 2
 
 .PHONY: build e2e-server lint security static test test-adapters test-adapters-race test-browser test-race trivy web-build
 
 test:
-	go test -parallel=$(TEST_PARALLEL) ./...
+	go test -p=$(TEST_PACKAGES) -parallel=$(TEST_PARALLEL) ./...
 	npm --prefix web run test
 
 test-race:
-	go test -race -parallel=$(TEST_PARALLEL) ./...
+	go test -race -p=$(TEST_PACKAGES) -parallel=$(TEST_PARALLEL) ./...
 
 test-adapters:
 	@command -v "$(RESTIC_TEST_BINARY)" >/dev/null || { echo "restic >= 0.18.0 is required"; exit 1; }
-	RESTIC_TEST_BINARY="$$(command -v "$(RESTIC_TEST_BINARY)")" go test -parallel=$(TEST_PARALLEL) -tags=integration ./internal/source/restic
+	RESTIC_TEST_BINARY="$$(command -v "$(RESTIC_TEST_BINARY)")" go test -p=$(TEST_PACKAGES) -parallel=$(TEST_PARALLEL) -tags=integration ./internal/source/restic
 
 test-adapters-race:
 	@command -v "$(RESTIC_TEST_BINARY)" >/dev/null || { echo "restic >= 0.18.0 is required"; exit 1; }
-	RESTIC_TEST_BINARY="$$(command -v "$(RESTIC_TEST_BINARY)")" go test -race -parallel=$(TEST_PARALLEL) -tags=integration ./internal/source/restic
+	RESTIC_TEST_BINARY="$$(command -v "$(RESTIC_TEST_BINARY)")" go test -race -p=$(TEST_PACKAGES) -parallel=$(TEST_PARALLEL) -tags=integration ./internal/source/restic
 
 lint:
 	go vet ./...
