@@ -217,6 +217,46 @@ func TestTerminalRunCannotRequireReconciliation(t *testing.T) {
 	}
 }
 
+func TestCleanupFailureStaysQueuedUntilARetrySucceeds(t *testing.T) {
+	t.Parallel()
+
+	now := time.Date(2026, time.July, 15, 17, 0, 0, 0, time.UTC)
+	run, _, err := drill.NewRun("run-1", "plan-1", 1, now)
+	if err != nil {
+		t.Fatalf("NewRun: %v", err)
+	}
+	if _, err := run.RecordOutcome(drill.OutcomeFailed, now.Add(time.Second)); err != nil {
+		t.Fatalf("RecordOutcome: %v", err)
+	}
+	failed, err := run.RecordCleanup(drill.CleanupFailed, now.Add(2*time.Second))
+	if err != nil {
+		t.Fatalf("RecordCleanup(failed): %v", err)
+	}
+	if failed.Kind != drill.EventCleanupFailed || !run.NeedsReconciliation || run.ReconciliationRequestedAt.IsZero() {
+		t.Fatalf("failed cleanup projection = %#v event = %#v", run, failed)
+	}
+
+	retry, err := run.BeginCleanupRetry(now.Add(3 * time.Second))
+	if err != nil {
+		t.Fatalf("BeginCleanupRetry: %v", err)
+	}
+	if retry.Kind != drill.EventReconciliationRequired || run.Cleanup != drill.CleanupPending || !run.NeedsReconciliation {
+		t.Fatalf("retry projection = %#v event = %#v", run, retry)
+	}
+	if _, err := run.RecordCleanup(drill.CleanupFailed, now.Add(4*time.Second)); err != nil {
+		t.Fatalf("RecordCleanup(second failure): %v", err)
+	}
+	if _, err := run.BeginCleanupRetry(now.Add(5 * time.Second)); err != nil {
+		t.Fatalf("BeginCleanupRetry(second): %v", err)
+	}
+	if _, err := run.RecordCleanup(drill.CleanupSucceeded, now.Add(6*time.Second)); err != nil {
+		t.Fatalf("RecordCleanup(success): %v", err)
+	}
+	if run.NeedsReconciliation || !run.ReconciliationRequestedAt.IsZero() || run.Cleanup != drill.CleanupSucceeded {
+		t.Fatalf("successful retry did not clear durable queue: %#v", run)
+	}
+}
+
 func TestRunRejectsInvalidInputsAndEventTimes(t *testing.T) {
 	t.Parallel()
 

@@ -2,13 +2,13 @@
 
 ## Small and scoped pull requests
 
-Run the relevant local tests and request `@codex review` on the pull request. Address concrete correctness, security, data-integrity, acceptance, and missing-test findings before merge.
+Run the relevant local tests and use the Matt Pocock `code-review` workflow with one fresh Standards reviewer and one fresh Spec reviewer. Address concrete correctness, security, data-integrity, acceptance, and missing-test findings before merge.
 
 ## Feature-dense or high-risk pull requests
 
-Use the no-mistakes remote from the feature worktree before pushing the final branch to origin. This includes orchestration state changes, Docker lifecycle/cleanup, authentication, secret handling, adapter execution, persistence migrations, Terraform, and cross-cutting releases.
+Use the same fresh Standards and Spec reviewers, plus proportional failure-path, race, integration, static, and security checks for the affected surface. Exact-head required CI remains mandatory. Reuse valid evidence after focused corrections instead of restarting broad review pipelines.
 
-The no-mistakes policy is interactive and capped at three autonomous review/fix rounds. Never use `--yes`. Auto-fix only error-level findings that threaten security, data integrity, external side effects, acceptance criteria, required verification, or unrecoverable reliability. Escalate all `ask-user` findings and optional hardening to Aziz.
+As explicitly directed on 2026-09-05, Rehearse does not use No Mistakes or another heavy autonomous review pipeline. GitHub AI review is optional extra evidence and is not a merge gate.
 
 ## Merge gate
 
@@ -17,4 +17,3 @@ The no-mistakes policy is interactive and capped at three autonomous review/fix 
 - Cleanup and failure paths receive equal scrutiny to the success path.
 - Documentation and examples describe only behavior the branch actually ships.
 - Merge remains a human decision.
-

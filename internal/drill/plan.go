@@ -35,8 +35,8 @@ type CredentialReference struct {
 }
 
 // PlanSpec is the persistable, secret-free portion of a drill plan. Adapter
-// value-bearing configuration belongs behind future adapter contracts, not in
-// this journal schema.
+// value-bearing configuration belongs behind configured adapter boundaries,
+// not in this journal schema.
 type PlanSpec struct {
 	SourceKind           string                `json:"source_kind"`
 	TargetKind           string                `json:"target_kind"`
@@ -109,4 +109,10 @@ func (reference CredentialReference) validate() error {
 		return errors.New("unsupported credential provider")
 	}
 	return nil
+}
+
+// Validate checks that a credential reference cannot carry an inline value and
+// uses a locator shape supported by its provider.
+func (reference CredentialReference) Validate() error {
+	return reference.validate()
 }

@@ -18,7 +18,7 @@ Read `CONTEXT.md`, `PRD.md`, and the relevant ADRs before changing product behav
 - Web: Vitest + React Testing Library for components and Playwright for critical recovery flows.
 - Infrastructure: `terraform fmt -check`, `terraform validate`, and TFLint.
 - Static/security: `go vet`, golangci-lint, govulncheck, and Trivy when the relevant surface exists.
-- Small/scoped PRs request `@codex review`. Feature-dense, security-sensitive, or cross-cutting PRs use the no-mistakes gate under `docs/agents/review-policy.md`.
+- Every PR uses one fresh Standards reviewer and one fresh Spec reviewer through the Matt Pocock `code-review` workflow. Feature-dense, security-sensitive, or cross-cutting PRs add proportional failure-path/security checks and exact-head CI; Rehearse does not use No Mistakes or another heavy autonomous review pipeline. GitHub AI review is optional extra evidence, not a merge gate.
 
 ## Agent skills
 
@@ -33,4 +33,3 @@ Use the standard five-label triage state machine. See `docs/agents/triage-labels
 ### Domain docs
 
 This is a single-context repository with root `CONTEXT.md` and `docs/adr/`. See `docs/agents/domain.md`.
-

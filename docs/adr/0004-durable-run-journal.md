@@ -24,6 +24,12 @@ startup from an empty or current database idempotent. When an existing database
 is reopened, unfinished runs receive durable restart-reconciliation metadata and
 an immutable reconciliation event.
 
+Opening the journal first acquires a non-blocking OS-backed exclusive ownership
+lock beside the database and holds it for the `Store` lifetime. A second live
+runtime receives a typed already-owned result before migrations or restart
+reconciliation can mutate durable state. Process exit releases the kernel lock;
+the next owner then performs the normal interrupted-run reconciliation.
+
 ## Why
 
 The append-only journal preserves what happened, while the projection makes
@@ -40,6 +46,8 @@ out-of-band secret policy at the persistence boundary.
 
 - State transitions are serialized through the SQLite owner and remain safe for
   concurrent callers.
+- v0.1 has one live journal owner; multi-process leases or distributed ownership
+  require a separate architecture decision.
 - `run_events` cannot be updated or deleted; corrections must be new events in a
   future migration or domain extension.
 - Future adapters may add typed, secret-free plan fields through migrations, but
