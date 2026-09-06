@@ -52,6 +52,19 @@ func (ledger *createdResourceLedger) expectedResource(kind, name string) (drill.
 	return resource, exists
 }
 
+func (ledger *createdResourceLedger) expectedResources(kind string) []drill.SandboxResourceClaim {
+	resources := make([]drill.SandboxResourceClaim, 0, len(ledger.expected))
+	for _, resource := range ledger.expected {
+		if resource.Kind == kind {
+			resources = append(resources, resource)
+		}
+	}
+	sort.Slice(resources, func(left, right int) bool {
+		return resources[left].Name < resources[right].Name
+	})
+	return resources
+}
+
 func (ledger *createdResourceLedger) ordered() []createdResource {
 	resources := make([]createdResource, 0, len(ledger.resources))
 	for _, resource := range ledger.resources {

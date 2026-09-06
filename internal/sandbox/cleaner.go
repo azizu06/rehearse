@@ -194,6 +194,14 @@ func (cleaner cleaner) removeManifestPass(ctx context.Context, identity identity
 
 func (cleaner cleaner) removeLedgerPass(ctx context.Context, identity identity, ledger *createdResourceLedger) (bool, error) {
 	empty := true
+	for _, expected := range ledger.expectedResources("container") {
+		if _, verified := ledger.get(expected.Kind, expected.Name); verified {
+			continue
+		}
+		if _, err := cleaner.captureExpectedContainer(ctx, identity, ledger, expected); err != nil {
+			return false, err
+		}
+	}
 	for _, created := range ledger.ordered() {
 		descriptor := resourceDescriptor(created.kind, created.name)
 		ids, err := findExactResourceIDs(ctx, cleaner.command, descriptor)
@@ -262,11 +270,52 @@ func (cleaner cleaner) removeLedgerPass(ctx context.Context, identity identity, 
 				return false, err
 			}
 			if labelsContain(inspected.Labels, labels) {
+				if resource.name == "container" {
+					captured, err := cleaner.captureExpectedContainer(ctx, identity, ledger, expected)
+					if err != nil {
+						return false, err
+					}
+					if captured {
+						empty = false
+						continue
+					}
+				}
 				return false, fmt.Errorf("unverified Rehearse %s resource %q carries its expected generation", resource.name, inspected.Name)
 			}
 		}
 	}
 	return empty, nil
+}
+
+func (cleaner cleaner) captureExpectedContainer(
+	ctx context.Context,
+	identity identity,
+	ledger *createdResourceLedger,
+	expected drill.SandboxResourceClaim,
+) (bool, error) {
+	descriptor := resourceDescriptor(expected.Kind, expected.Name)
+	ids, err := findExactResourceIDs(ctx, cleaner.command, descriptor)
+	if err != nil {
+		return false, fmt.Errorf("inspect expected Rehearse container %q: %w", expected.Name, err)
+	}
+	if len(ids) == 0 {
+		return false, nil
+	}
+	inspected, err := inspectResource(ctx, cleaner.command, descriptor)
+	if err != nil {
+		return false, fmt.Errorf("verify expected Rehearse container %q: %w", expected.Name, err)
+	}
+	labels, err := resourceLabels(identity, expected.Generation)
+	if err != nil {
+		return false, err
+	}
+	if !labelsContain(inspected.Labels, labels) {
+		return false, nil
+	}
+	ledger.add(createdResource{
+		kind: expected.Kind, name: expected.Name, daemonID: inspected.DaemonID, generation: expected.Generation,
+	})
+	return true, nil
 }
 
 func removeResourceArgs(kind, target string) []string {

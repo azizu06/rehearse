@@ -172,6 +172,77 @@ func TestRealDockerLiveCleanupPreservesRapidVolumeGenerationReplacement(t *testi
 	}
 }
 
+func TestRealDockerRunnerCleansContainerCreatedAfterCancelledComposeUp(t *testing.T) {
+	name, err, status := runRealDockerCancelledUp(t, "")
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("Run error = %v, want context.Canceled", err)
+	}
+	if status != drill.CleanupSucceeded {
+		t.Errorf("cleanup status = %q, want %q; Run error: %v", status, drill.CleanupSucceeded, err)
+	}
+	if output, inspectErr := exec.Command("docker", "container", "inspect", "--format", `{{ .Id }}`, name).CombinedOutput(); inspectErr == nil {
+		t.Fatalf("late container survived cancelled Run cleanup: %s", output)
+	}
+}
+
+func TestRealDockerRunnerPreservesLateContainerWithMismatchedGeneration(t *testing.T) {
+	generation := strings.Repeat("f", 64)
+	name, err, status := runRealDockerCancelledUp(t, generation)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("Run error = %v, want context.Canceled", err)
+	}
+	if status != drill.CleanupSucceeded {
+		t.Errorf("cleanup status = %q, want %q; Run error: %v", status, drill.CleanupSucceeded, err)
+	}
+	output, inspectErr := exec.Command(
+		"docker", "container", "inspect", "--format",
+		`{{ index .Config.Labels "dev.rehearse.resource-generation" }}`, name,
+	).CombinedOutput()
+	if inspectErr != nil || strings.TrimSpace(string(output)) != generation {
+		t.Fatalf("mismatched-generation container was changed or deleted: output=%q error=%v", output, inspectErr)
+	}
+}
+
+func runRealDockerCancelledUp(t *testing.T, generationOverride string) (string, error, drill.CleanupStatus) {
+	t.Helper()
+	if os.Getenv("REHEARSE_DOCKER_INTEGRATION") != "1" {
+		t.Skip("set REHEARSE_DOCKER_INTEGRATION=1 to run real Docker tests")
+	}
+	if err := exec.Command("docker", "info").Run(); err != nil {
+		t.Skipf("Docker is unavailable: %v", err)
+	}
+
+	runID := uniqueInternalDockerRunID(t, "integration-cancelled-up-late-container")
+	stable, _ := newIdentity(runID)
+	name := stable.projectName + "-worker-1"
+	registerOwnedDockerCleanup(t, "container", name, map[string]string{internalDockerTestOwnerLabel: runID})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	root := t.TempDir()
+	command := &delayedContainerAfterCancelledUp{
+		delegate: newCommandExecutor("docker"), cancel: cancel, name: name,
+		testOwner: runID, generationOverride: generationOverride, created: make(chan error, 1),
+	}
+	journal := &recordingCleanupJournal{}
+	runner := &DockerRunner{
+		command: command,
+		cleaner: cleaner{command: command, waiter: timerWaiter{}, quiescence: cleanupQuiescence, snapshotRoot: root},
+		journal: journal, locker: newProjectLocker(filepath.Join(root, "locks")),
+		temporaryRoot: root, cleanupTimeout: 10 * time.Second,
+		newClaimID:      func() (string, error) { return testClaimID, nil },
+		newGenerationID: testGenerationGenerator(),
+	}
+	request := Request{
+		RunID: runID, ComposeFiles: []string{filepath.Join("testdata", "compose.yaml")},
+		Limits: Limits{CPUs: "0.25", MemoryBytes: 32 << 20, PIDs: 16, Duration: 20 * time.Second, OutputBytes: 1 << 20},
+	}
+	_, err := runner.Run(ctx, request, func(context.Context, Instance) error {
+		t.Fatal("callback ran after cancelled Compose up")
+		return nil
+	})
+	return name, err, journal.lastStatus()
+}
+
 type lateCollisionRealDocker struct {
 	delegate  dockerCommand
 	injected  bool
@@ -200,6 +271,75 @@ func (docker *lateCollisionRealDocker) run(ctx context.Context, limit int64, arg
 	return docker.delegate.run(ctx, limit, args...)
 }
 
+type delayedContainerAfterCancelledUp struct {
+	delegate           dockerCommand
+	cancel             context.CancelFunc
+	name               string
+	testOwner          string
+	generationOverride string
+	image              string
+	labels             map[string]string
+	pending            bool
+	created            chan error
+}
+
+func (docker *delayedContainerAfterCancelledUp) run(ctx context.Context, limit int64, args ...string) ([]byte, error) {
+	if containsSequence(args, "up", "--detach") {
+		data, err := os.ReadFile(lastFileArgument(args))
+		if err != nil {
+			return nil, err
+		}
+		var snapshot struct {
+			Services map[string]struct {
+				Image  string            `json:"image"`
+				Labels map[string]string `json:"labels"`
+			} `json:"services"`
+		}
+		if err := json.Unmarshal(data, &snapshot); err != nil {
+			return nil, err
+		}
+		docker.image = snapshot.Services["worker"].Image
+		docker.labels = snapshot.Services["worker"].Labels
+		docker.pending = true
+		docker.cancel()
+		return nil, context.Canceled
+	}
+
+	joined := strings.Join(args, " ")
+	if docker.pending && len(args) >= 2 && args[0] == "container" && args[1] == "ls" &&
+		strings.Contains(joined, "name=^/"+docker.name+"$") {
+		output, err := docker.delegate.run(ctx, limit, args...)
+		docker.pending = false
+		createArgs := []string{"container", "create", "--name", docker.name}
+		labels := make(map[string]string, len(docker.labels)+1)
+		for key, value := range docker.labels {
+			labels[key] = value
+		}
+		labels[internalDockerTestOwnerLabel] = docker.testOwner
+		if docker.generationOverride != "" {
+			labels[resourceGenerationLabel] = docker.generationOverride
+		}
+		for _, label := range sortedLabels(labels) {
+			createArgs = append(createArgs, "--label", label)
+		}
+		createArgs = append(createArgs, docker.image, "sleep", "30")
+		created := docker.created
+		go func() {
+			_, createErr := docker.delegate.run(context.Background(), dockerMetadataOutputLimit, createArgs...)
+			created <- createErr
+		}()
+		return output, err
+	}
+	if docker.created != nil && len(args) >= 2 && args[0] == "container" && args[1] == "ls" &&
+		strings.Contains(joined, "label="+sandboxClaimLabel+"=") {
+		if err := <-docker.created; err != nil {
+			return nil, err
+		}
+		docker.created = nil
+	}
+	return docker.delegate.run(ctx, limit, args...)
+}
+
 func uniqueInternalDockerRunID(t *testing.T, prefix string) string {
 	t.Helper()
 	value, err := generateClaimID()
@@ -216,7 +356,11 @@ func registerOwnedDockerCleanup(t *testing.T, kind, name string, expected map[st
 
 func removeOwnedDockerResource(t *testing.T, kind, name string, expected map[string]string, required bool) {
 	t.Helper()
-	output, err := exec.Command("docker", kind, "inspect", "--format", `{{json .Labels}}`, name).CombinedOutput()
+	labelsPath := ".Labels"
+	if kind == "container" {
+		labelsPath = ".Config.Labels"
+	}
+	output, err := exec.Command("docker", kind, "inspect", "--format", `{{json `+labelsPath+`}}`, name).CombinedOutput()
 	if err != nil {
 		if required {
 			t.Fatalf("inspect owned test %s %q: %v\n%s", kind, name, err, output)
