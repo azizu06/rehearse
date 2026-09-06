@@ -112,7 +112,7 @@ func (runner *DockerRunner) Run(
 	}()
 	runContext, cancel := context.WithTimeout(ctx, normalized.Limits.Duration)
 	defer cancel()
-	configArgs := append(composeArgs(normalized, ""), "config", "--format", "json", "--no-env-resolution", "--no-path-resolution")
+	configArgs := append(composeArgs(normalized, ""), "--profile", "*", "config", "--format", "json", "--no-env-resolution", "--no-path-resolution")
 	resolved, err := runner.command.run(runContext, normalized.Limits.OutputBytes, configArgs...)
 	if err != nil {
 		return instance, fmt.Errorf("resolve Compose model: %w", err)

@@ -331,6 +331,65 @@ func TestStartupCleanerUsesOnlyTheActiveSandboxClaim(t *testing.T) {
 	}
 }
 
+func TestDockerRunnerRejectsProfilesFromTheFullComposeProjection(t *testing.T) {
+	requireDockerIntegration(t)
+
+	tests := []struct {
+		name    string
+		compose string
+	}{
+		{
+			name: "ordinary and profiled services",
+			compose: `
+services:
+  normal:
+    image: alpine
+  optional:
+    image: alpine
+    profiles: [extra]
+`,
+		},
+		{
+			name: "profiled service only",
+			compose: `
+services:
+  optional:
+    image: alpine
+    profiles: [extra]
+`,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			runID := uniqueDockerRunID(t, "integration-profile-rejection")
+			composePath := filepath.Join(t.TempDir(), "compose.yaml")
+			if err := os.WriteFile(composePath, []byte(test.compose), 0o600); err != nil {
+				t.Fatalf("write Compose fixture: %v", err)
+			}
+			runner := sandbox.NewDockerRunner(sandbox.DockerRunnerOptions{
+				Binary: "docker", CleanupJournal: newCleanupJournal(t, runID),
+				TemporaryRoot: t.TempDir(), LockRoot: t.TempDir(), CleanupTimeout: 5 * time.Second,
+			})
+			request := sandbox.Request{
+				RunID: runID, ComposeFiles: []string{composePath},
+				Limits: sandbox.Limits{CPUs: "0.25", MemoryBytes: 32 << 20, PIDs: 16, Duration: 10 * time.Second, OutputBytes: 1 << 20},
+			}
+			callbackCalled := false
+			_, err := runner.Run(context.Background(), request, func(context.Context, sandbox.Instance) error {
+				callbackCalled = true
+				return nil
+			})
+			if !errors.Is(err, sandbox.ErrUnsafeCompose) {
+				t.Fatalf("Run error = %v, want ErrUnsafeCompose", err)
+			}
+			if callbackCalled {
+				t.Fatal("runner executed a profiled Compose service")
+			}
+			assertNoRunResources(t, runID)
+		})
+	}
+}
+
 func TestDockerRunnerCleansAfterCancellation(t *testing.T) {
 	requireDockerIntegration(t)
 

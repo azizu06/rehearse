@@ -53,8 +53,8 @@ func TestRunnerUsesShellFreeNoBuildNoPullAndFreshCleanupContext(t *testing.T) {
 		t.Fatalf("unsafe Compose up argv: %v", command.upCall)
 	}
 	for _, argument := range command.upCall {
-		if argument == "sh" || argument == "bash" || argument == "-c" || argument == "--build" {
-			t.Fatalf("shell/build argument crossed boundary: %q", argument)
+		if argument == "sh" || argument == "bash" || argument == "-c" || argument == "--build" || argument == "--profile" {
+			t.Fatalf("shell/build/profile argument crossed boundary: %q", argument)
 		}
 	}
 }
