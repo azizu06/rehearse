@@ -93,6 +93,13 @@ Existing or late-colliding resources are never adopted or deleted, even when
 they reproduce every stable label. A Docker-daemon administrator remains inside
 the trusted local boundary and can subvert Docker resource metadata.
 
+`Run` invokes its callback synchronously under the run context. The callback is
+a trusted in-process orchestration hook, not an untrusted plugin boundary, and
+must return after cancellation. Cleanup and project-lock release begin only
+after the callback returns. Interruptible workload and adapter operations belong
+behind context-bound subprocess or Docker boundaries. Supporting untrusted
+callbacks would require a separate process protocol and is outside Issue #8.
+
 Cleanup uses a fresh bounded context after success, failure, cancellation,
 timeout, or output overflow.
 Container removal never cascades into attached volumes; every volume deletion

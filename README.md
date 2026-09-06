@@ -67,6 +67,11 @@ The real sandbox boundary is opt-in locally because it creates short-lived
 labeled Docker resources. It requires the pinned Alpine fixture image to exist
 before the runner starts; the runner itself never builds or pulls images:
 
+`DockerRunner.Run` accepts a trusted in-process orchestration callback. The
+callback must honor its context and return before the runner cleans the sandbox.
+Interruptible workload operations should use context-bound subprocess or Docker
+boundaries rather than detached goroutines.
+
 ```bash
 docker pull alpine@sha256:28bd5fe8b56d1bd048e5babf5b10710ebe0bae67db86916198a6eec434943f8b
 REHEARSE_DOCKER_INTEGRATION=1 go test -race ./internal/sandbox -count=1

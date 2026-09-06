@@ -48,9 +48,9 @@ func NewDockerRunner(options DockerRunnerOptions) *DockerRunner {
 	}
 }
 
-// Run creates one project, invokes use while it is healthy, and always attempts
-// cleanup with an independent deadline after start success/failure, timeout,
-// cancellation, or output overflow.
+// Run invokes one trusted callback synchronously inside an isolated project.
+// The callback must honor its context; cleanup waits for it to return after
+// success, failure, cancellation, timeout, or output overflow.
 func (runner *DockerRunner) Run(
 	ctx context.Context,
 	request Request,
@@ -199,34 +199,11 @@ func (runner *DockerRunner) Run(
 	if captureErr != nil {
 		return instance, captureErr
 	}
-	callback := make(chan callbackResult, 1)
-	go invokeCallback(runContext, instance, use, callback)
-	select {
-	case completed := <-callback:
-		if completed.panicValue != nil {
-			panic(completed.panicValue)
-		}
-		if cause := context.Cause(runContext); cause != nil {
-			return instance, errors.Join(completed.err, cause)
-		}
-		return instance, completed.err
-	case <-runContext.Done():
-		return instance, context.Cause(runContext)
+	callbackErr := use(runContext, instance)
+	if cause := context.Cause(runContext); cause != nil {
+		return instance, errors.Join(callbackErr, cause)
 	}
-}
-
-type callbackResult struct {
-	err        error
-	panicValue any
-}
-
-func invokeCallback(ctx context.Context, instance Instance, use func(context.Context, Instance) error, result chan<- callbackResult) {
-	defer func() {
-		if value := recover(); value != nil {
-			result <- callbackResult{panicValue: value}
-		}
-	}()
-	result <- callbackResult{err: use(ctx, instance)}
+	return instance, callbackErr
 }
 
 func durationSeconds(duration time.Duration) string {

@@ -65,6 +65,8 @@ type runnerDocker struct {
 	upCall              []string
 	upSnapshotImage     string
 	cleanupObserved     bool
+	cleanupStarted      chan struct{}
+	cleanupOnce         sync.Once
 	cleanupContextErr   error
 	configCalls         int
 	platform            string
@@ -256,6 +258,9 @@ func (docker *runnerDocker) run(ctx context.Context, _ int64, args ...string) ([
 	if len(args) >= 2 && args[1] == "ls" {
 		joined := strings.Join(args, " ")
 		if strings.Contains(joined, "label="+sandboxClaimLabel+"=") {
+			if docker.cleanupStarted != nil {
+				docker.cleanupOnce.Do(func() { close(docker.cleanupStarted) })
+			}
 			docker.cleanupObserved = true
 			docker.cleanupContextErr = ctx.Err()
 			return docker.listClaimed(args[0], joined), nil
@@ -592,25 +597,64 @@ func TestRunnerRemovesSnapshotAndCleansAfterStartBoundaryErrors(t *testing.T) {
 	}
 }
 
-func TestRunnerEnforcesDurationWithoutCallbackCooperation(t *testing.T) {
+func TestRunnerWaitsForCancelledCallbackBeforeCleanup(t *testing.T) {
 	release := make(chan struct{})
-	command := &runnerDocker{}
+	cancelled := make(chan struct{})
+	returned := make(chan struct{})
+	cleanupStarted := make(chan struct{})
+	command := &runnerDocker{cleanupStarted: cleanupStarted}
 	runner := testRunner(t, command, &recordingCleanupJournal{})
-	request := testRunnerRequest("run-uncooperative-timeout", 20*time.Millisecond)
-	started := time.Now()
-	_, err := runner.Run(context.Background(), request, func(context.Context, Instance) error {
-		<-release
-		return nil
-	})
+	request := testRunnerRequest("run-callback-quiescence", 20*time.Millisecond)
+	result := make(chan error, 1)
+	go func() {
+		_, err := runner.Run(context.Background(), request, func(ctx context.Context, _ Instance) error {
+			<-ctx.Done()
+			close(cancelled)
+			<-release
+			close(returned)
+			return context.Cause(ctx)
+		})
+		result <- err
+	}()
+	select {
+	case <-cancelled:
+	case <-time.After(time.Second):
+		close(release)
+		t.Fatal("callback did not observe the run deadline")
+	}
+	settle := time.NewTimer(50 * time.Millisecond)
+	defer settle.Stop()
+	select {
+	case <-cleanupStarted:
+		close(release)
+		t.Fatal("cleanup started while the cancelled callback was still active")
+	case err := <-result:
+		close(release)
+		t.Fatalf("Run returned before its cancelled callback completed: %v", err)
+	case <-settle.C:
+	}
 	close(release)
+	select {
+	case <-returned:
+	case <-time.After(time.Second):
+		t.Fatal("callback did not return after release")
+	}
+	select {
+	case <-cleanupStarted:
+	case <-time.After(time.Second):
+		t.Fatal("cleanup did not start after callback quiescence")
+	}
+	var err error
+	select {
+	case err = <-result:
+	case <-time.After(time.Second):
+		t.Fatal("Run did not return after cleanup")
+	}
 	if !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("Run error = %v, want context deadline", err)
 	}
-	if elapsed := time.Since(started); elapsed > time.Second {
-		t.Fatalf("Run waited %s for an uncooperative callback", elapsed)
-	}
 	if !command.cleanupObserved {
-		t.Fatal("runner skipped cleanup after independent timeout")
+		t.Fatal("runner skipped cleanup after callback quiescence")
 	}
 }
 
