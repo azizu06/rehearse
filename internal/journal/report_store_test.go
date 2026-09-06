@@ -4,11 +4,16 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
+	"github.com/azizu06/rehearse/internal/controlplane"
 	"github.com/azizu06/rehearse/internal/drill"
 	"github.com/azizu06/rehearse/internal/evidence"
 	"github.com/azizu06/rehearse/internal/journal"
@@ -16,10 +21,17 @@ import (
 	"github.com/azizu06/rehearse/internal/redact"
 )
 
-func TestTypedProbeConfigAndRedactedReportSurviveRestart(t *testing.T) {
+func TestCommandBoundaryEvidenceRemainsRedactedThroughRestartAndAPI(t *testing.T) {
 	t.Parallel()
 
 	ctx := context.Background()
+	executable, err := os.Executable()
+	if err != nil {
+		t.Fatalf("os.Executable() error = %v", err)
+	}
+	secret := "issue-10-persisted-secret"
+	boundaryMarker := commandReportBoundaryMarker()
+	redactor := redact.New(secret, boundaryMarker)
 	directory := t.TempDir()
 	path := filepath.Join(directory, "rehearse.db")
 	store, err := journal.Open(ctx, path)
@@ -34,8 +46,13 @@ func TestTypedProbeConfigAndRedactedReportSurviveRestart(t *testing.T) {
 			ProbeConfig: probe.Config{SchemaVersion: probe.SchemaVersion, Probes: []probe.Spec{
 				{
 					Ordinal: 1, ID: "trusted-check", Kind: probe.KindCommand, Required: true,
-					Retry:   probe.RetryPolicy{Deadline: time.Second, Backoff: 10 * time.Millisecond, MaxAttempts: 1},
-					Command: &probe.CommandSpec{Executable: "/usr/bin/true", ExpectedExitCode: 0, TrustAcknowledged: true},
+					Retry: probe.RetryPolicy{Deadline: 5 * time.Second, Backoff: 10 * time.Millisecond, MaxAttempts: 1},
+					Command: &probe.CommandSpec{
+						Executable:        executable,
+						Args:              []string{"-test.run=TestProbeCommandReportBoundaryHelper", "--", "report-boundary-helper"},
+						ExpectedExitCode:  0,
+						TrustAcknowledged: true,
+					},
 				},
 			}},
 		},
@@ -62,28 +79,31 @@ func TestTypedProbeConfigAndRedactedReportSurviveRestart(t *testing.T) {
 		t.Fatalf("RecordCleanup: %v", err)
 	}
 
-	secret := "issue-10-persisted-secret"
+	probeResult := probe.NewRunner(probe.Options{Redactor: redactor}).Run(ctx, plan.Spec.ProbeConfig)
+	if !probeResult.RequiredPassed {
+		t.Fatalf("Runner.Run() required passed = false, probes = %#v", probeResult.Probes)
+	}
 	report := evidence.Report{
 		SchemaVersion: evidence.SchemaVersion,
 		RunID:         run.ID, PlanID: plan.ID, PlanVersion: plan.Version,
 		RecoveryPoint: evidence.RecoveryPoint{ID: "snapshot-" + secret, SelectedAt: startedAt},
 		Stages:        []evidence.Stage{{Ordinal: 1, Name: drill.StageProbe, StartedAt: startedAt.Add(5 * time.Second), FinishedAt: startedAt.Add(6 * time.Second), Duration: time.Second}},
-		Probes:        []probe.Evidence{{Ordinal: 1, ID: "trusted-check", Kind: probe.KindCommand, Required: true, Status: probe.StatusPassed, Attempts: 1, StartedAt: startedAt.Add(5 * time.Second), FinishedAt: startedAt.Add(6 * time.Second), Duration: time.Second, Observed: secret, TrustedHostCommand: true}},
+		Probes:        probeResult.Probes,
 		Outcome:       run.Outcome, Cleanup: run.Cleanup,
 	}
 	forged := report
 	forged.Probes = append([]probe.Evidence(nil), report.Probes...)
 	forged.Probes[0].Required = false
-	if err := store.SaveReport(ctx, forged, redact.New(secret)); !errors.Is(err, evidence.ErrInvalidReport) {
+	if err := store.SaveReport(ctx, forged, redactor); !errors.Is(err, evidence.ErrInvalidReport) {
 		t.Fatalf("SaveReport accepted evidence that hid a required probe: %v", err)
 	}
 	forged = report
 	forged.Probes = append([]probe.Evidence(nil), report.Probes...)
 	forged.Probes[0].Attempts = 100
-	if err := store.SaveReport(ctx, forged, redact.New(secret)); !errors.Is(err, evidence.ErrInvalidReport) {
+	if err := store.SaveReport(ctx, forged, redactor); !errors.Is(err, evidence.ErrInvalidReport) {
 		t.Fatalf("SaveReport accepted impossible retry evidence: %v", err)
 	}
-	if err := store.SaveReport(ctx, report, redact.New(secret)); err != nil {
+	if err := store.SaveReport(ctx, report, redactor); err != nil {
 		t.Fatalf("SaveReport: %v", err)
 	}
 	if err := store.Close(); err != nil {
@@ -119,11 +139,59 @@ func TestTypedProbeConfigAndRedactedReportSurviveRestart(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Report: %v", err)
 	}
-	encoded, err := loadedReport.CanonicalJSON(redact.New(secret))
+	assertBoundedCommandEvidence(t, loadedReport.Probes[0].Observed, boundaryMarker)
+	handler := controlplane.NewHandler(controlplane.Options{ReportReader: reopened, Redactor: redactor})
+	request := httptest.NewRequest(http.MethodGet, "/api/v1/runs/run-10/report", nil)
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("report API status = %d, want %d: %s", response.Code, http.StatusOK, response.Body.String())
+	}
+	apiReport, err := evidence.ParseJSON(response.Body.Bytes())
+	if err != nil {
+		t.Fatalf("ParseJSON(report API) error = %v", err)
+	}
+	assertBoundedCommandEvidence(t, apiReport.Probes[0].Observed, boundaryMarker)
+	encoded, err := loadedReport.CanonicalJSON(redactor)
 	if err != nil {
 		t.Fatalf("CanonicalJSON: %v", err)
 	}
 	if bytes.Contains(encoded, []byte(secret)) || !bytes.Contains(encoded, []byte(redact.Replacement)) {
 		t.Fatalf("loaded report redaction = %s", encoded)
+	}
+}
+
+func commandReportBoundaryMarker() string {
+	return "xY" + strings.Repeat("z", 2<<10)
+}
+
+func assertBoundedCommandEvidence(t *testing.T, observed, marker string) {
+	t.Helper()
+	if strings.Contains(observed, marker) || strings.Contains(observed, "xY") {
+		t.Fatalf("command Observed leaked capture-boundary marker prefix: %q", observed)
+	}
+	stdout, _, ok := strings.Cut(observed, "\nstderr:")
+	if !ok {
+		t.Fatalf("command Observed = %q, want stdout/stderr sections", observed)
+	}
+	if got := len(strings.TrimPrefix(stdout, "stdout:")); got > 16<<10 {
+		t.Fatalf("command stdout evidence bytes = %d, want at most %d", got, 16<<10)
+	}
+}
+
+func TestProbeCommandReportBoundaryHelper(t *testing.T) {
+	isHelper := false
+	for _, argument := range os.Args {
+		if argument == "report-boundary-helper" {
+			isHelper = true
+			break
+		}
+	}
+	if !isHelper {
+		t.Skip("helper process only")
+	}
+	marker := commandReportBoundaryMarker()
+	if _, err := fmt.Fprint(os.Stdout, strings.Repeat("o", (16<<10)+len(marker)-2)+marker); err != nil {
+		t.Fatalf("write stdout: %v", err)
 	}
 }

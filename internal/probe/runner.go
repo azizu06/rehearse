@@ -267,14 +267,14 @@ func (runner *Runner) runCommand(parent context.Context, spec Spec) Evidence {
 		if err != nil {
 			var exitError *exec.ExitError
 			if !errors.As(err, &exitError) {
-				return commandOutput(stdout, stderr), err
+				return runner.commandOutput(&stdout, &stderr), err
 			}
 			exitCode = exitError.ExitCode()
 		}
 		if exitCode != spec.Command.ExpectedExitCode {
-			return commandOutput(stdout, stderr), fmt.Errorf("command exit code %d", exitCode)
+			return runner.commandOutput(&stdout, &stderr), fmt.Errorf("command exit code %d", exitCode)
 		}
-		return commandOutput(stdout, stderr), nil
+		return runner.commandOutput(&stdout, &stderr), nil
 	})
 	evidence.TrustedHostCommand = true
 	evidence.StdoutTruncated = stdout.truncated
@@ -283,8 +283,12 @@ func (runner *Runner) runCommand(parent context.Context, spec Spec) Evidence {
 	return evidence
 }
 
-func commandOutput(stdout, stderr cappedBuffer) string {
-	return "stdout:" + stdout.buffer.String() + "\nstderr:" + stderr.buffer.String()
+func (runner *Runner) commandOutput(stdout, stderr *cappedBuffer) string {
+	stdoutValue, stdoutTruncated := runner.redactor.BoundedString(stdout.buffer.String(), maxObservedBytes)
+	stderrValue, stderrTruncated := runner.redactor.BoundedString(stderr.buffer.String(), maxObservedBytes)
+	stdout.truncated = stdout.truncated || stdoutTruncated
+	stderr.truncated = stderr.truncated || stderrTruncated
+	return "stdout:" + stdoutValue + "\nstderr:" + stderrValue
 }
 
 func (runner *Runner) runData(parent context.Context, spec Spec) Evidence {
@@ -381,6 +385,12 @@ func (runner *Runner) runAttempts(parent context.Context, spec Spec, attempt fun
 		evidence.Attempts++
 		observed, err := attempt(ctx)
 		if err == nil {
+			if ctx.Err() != nil {
+				if parent.Err() == nil && errors.Is(ctx.Err(), context.DeadlineExceeded) {
+					evidence.ExhaustedBy = ExhaustedDeadline
+				}
+				break
+			}
 			evidence.Status = StatusPassed
 			evidence.Observed, evidence.Truncated = runner.redactor.BoundedString(observed, 33<<10)
 			break

@@ -52,6 +52,68 @@ func TestRetryStopsAtFirstExhaustedConstraint(t *testing.T) {
 	}
 }
 
+func TestRunRejectsAttemptSuccessAfterCancellation(t *testing.T) {
+	t.Parallel()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	client := &http.Client{Transport: cancellingSuccessfulTransport{cancel: cancel}}
+	configuration, err := probe.ParseConfig(strings.NewReader(`{
+  "schema_version":"rehearse.probes/v1",
+  "probes":[{
+    "ordinal":1,"id":"cancelled-success","kind":"http","required":true,
+    "retry":{"deadline":"1s","backoff":"10ms","max_attempts":1},
+    "http":{"url":"http://127.0.0.1/success","expected_status":204}
+  }]
+}`))
+	if err != nil {
+		t.Fatalf("ParseConfig() error = %v", err)
+	}
+
+	result := probe.NewRunner(probe.Options{HTTPClient: client}).Run(ctx, configuration)
+
+	if result.RequiredPassed {
+		t.Error("Runner.Run() required passed = true, want false after cancellation")
+	}
+	if got := result.Probes[0].Status; got != probe.StatusCancelled {
+		t.Errorf("Runner.Run() probe status = %q, want %q", got, probe.StatusCancelled)
+	}
+	if got := result.Probes[0].Attempts; got != 1 {
+		t.Errorf("Runner.Run() attempts = %d, want 1", got)
+	}
+}
+
+func TestRunRejectsAttemptSuccessAfterProbeDeadline(t *testing.T) {
+	t.Parallel()
+
+	client := &http.Client{Transport: successfulAfterContextDoneTransport{}}
+	configuration, err := probe.ParseConfig(strings.NewReader(`{
+  "schema_version":"rehearse.probes/v1",
+  "probes":[{
+    "ordinal":1,"id":"late-success","kind":"http","required":true,
+    "retry":{"deadline":"10ms","backoff":"10ms","max_attempts":1},
+    "http":{"url":"http://127.0.0.1/success","expected_status":204}
+  }]
+}`))
+	if err != nil {
+		t.Fatalf("ParseConfig() error = %v", err)
+	}
+
+	result := probe.NewRunner(probe.Options{HTTPClient: client}).Run(context.Background(), configuration)
+
+	if result.RequiredPassed {
+		t.Error("Runner.Run() required passed = true, want false after probe deadline")
+	}
+	if got := result.Probes[0].Status; got != probe.StatusTimedOut {
+		t.Errorf("Runner.Run() probe status = %q, want %q", got, probe.StatusTimedOut)
+	}
+	if got := result.Probes[0].ExhaustedBy; got != probe.ExhaustedDeadline {
+		t.Errorf("Runner.Run() exhausted by = %q, want %q", got, probe.ExhaustedDeadline)
+	}
+	if got := result.Probes[0].Attempts; got != 1 {
+		t.Errorf("Runner.Run() attempts = %d, want 1", got)
+	}
+}
+
 type fakeClock struct {
 	now time.Time
 }
@@ -72,6 +134,32 @@ type failingTransport struct{}
 
 func (failingTransport) RoundTrip(*http.Request) (*http.Response, error) {
 	return nil, errors.New("boundary unavailable")
+}
+
+type cancellingSuccessfulTransport struct {
+	cancel context.CancelFunc
+}
+
+func (transport cancellingSuccessfulTransport) RoundTrip(request *http.Request) (*http.Response, error) {
+	transport.cancel()
+	return &http.Response{
+		StatusCode: http.StatusNoContent,
+		Header:     make(http.Header),
+		Body:       http.NoBody,
+		Request:    request,
+	}, nil
+}
+
+type successfulAfterContextDoneTransport struct{}
+
+func (successfulAfterContextDoneTransport) RoundTrip(request *http.Request) (*http.Response, error) {
+	<-request.Context().Done()
+	return &http.Response{
+		StatusCode: http.StatusNoContent,
+		Header:     make(http.Header),
+		Body:       http.NoBody,
+		Request:    request,
+	}, nil
 }
 
 func itoa(value int) string {
