@@ -4,7 +4,7 @@
 
 Rehearse is an open-source recovery-drill platform for self-hosted applications. It restores a real backup into an isolated Docker Compose environment, starts the application, runs application-level probes, records recovery time and failures, and removes the temporary environment.
 
-> Project status: foundation phase. The tested Go/React tracer bullet and durable drill journal are in place; installation instructions will appear once the first complete recovery drill is reliable.
+> Project status: foundation phase. The tested Go/React tracer bullet, durable drill journal, vendor-independent source contract, and read-only restic adapter for local and S3-compatible repositories are in place. The adapter is not yet wired into a complete recovery drill; installation instructions will appear once that path is reliable.
 
 ## Why Rehearse
 
@@ -56,10 +56,13 @@ The tracer-bullet toolchain requires the Go version declared in `go.mod` and Nod
 npm --prefix web ci
 make test
 make test-race
+make test-adapters
 make lint
 make static
 make build
 ```
+
+`make test-adapters` exercises real local and S3-compatible restic repositories. It requires restic 0.18.0 or newer plus a Docker-compatible runtime for the Testcontainers-managed S3 service. Orchestration must successfully preflight every newly configured adapter instance before listing or acquisition. Use `make test-adapters-race` to run the same boundary checks with Go's race detector.
 
 `make security` adds `govulncheck` plus a pinned Trivy filesystem scan. It requires Trivy 0.72.0 on `PATH`, or `TRIVY=/path/to/trivy`; CI installs the same scanner version.
 
