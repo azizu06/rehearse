@@ -2,7 +2,7 @@
 
 ## Current state
 
-Rehearse has an approved product definition, a tested Go/React tracer bullet, the durable drill state machine and SQLite journal described in [ADR 0004](docs/adr/0004-durable-run-journal.md), and the bounded Docker Compose sandbox and retryable startup janitor described in [ADR 0005](docs/adr/0005-isolated-compose-sandbox.md). GitHub Issues and the project board define the implementation order and current status.
+Rehearse has an approved product definition, a tested Go/React tracer bullet, a durable SQLite journal, a bounded Docker Compose sandbox with startup cleanup, and a read-only restic source adapter. See the [README project status](README.md) for the shipped repository surface. GitHub Issues and the project board define the implementation order and current status.
 
 ## Next implementation task
 
