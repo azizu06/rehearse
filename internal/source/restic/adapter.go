@@ -310,6 +310,7 @@ var (
 	errOutputLimit              = errors.New("process output limit exceeded")
 	errInvalidVersionMessage    = errors.New("invalid restic version message")
 	errInvalidResticMessageType = errors.New("invalid restic message_type")
+	errInvalidSnapshotMessage   = errors.New("invalid restic snapshot message")
 	errInvalidRestoreSummary    = errors.New("invalid restic restore summary")
 	errInvalidStructuredExit    = errors.New("invalid structured restic exit")
 	errInconsistentExitCode     = errors.New("inconsistent structured restic exit code")
@@ -405,12 +406,12 @@ func (adapter *Adapter) ListRecoveryPoints(ctx context.Context) ([]source.Recove
 		return nil, err
 	}
 
-	var snapshots *[]snapshotMessage
-	if err := json.Unmarshal(stdout, &snapshots); err != nil || snapshots == nil {
+	snapshots, err := decodeSnapshotMessages(stdout)
+	if err != nil {
 		return nil, &source.Failure{Kind: source.FailureCorruptOutput, Operation: "list", SafeHint: "restic returned invalid snapshot JSON"}
 	}
-	points := make([]source.RecoveryPoint, 0, len(*snapshots))
-	for _, snapshot := range *snapshots {
+	points := make([]source.RecoveryPoint, 0, len(snapshots))
+	for _, snapshot := range snapshots {
 		createdAt, err := time.Parse(time.RFC3339Nano, snapshot.Time)
 		if err != nil || !snapshotIDPattern.MatchString(snapshot.ID) {
 			return nil, &source.Failure{Kind: source.FailureCorruptOutput, Operation: "list", SafeHint: "restic returned invalid snapshot metadata"}
@@ -624,6 +625,141 @@ func decodeJSONString(raw json.RawMessage) (string, bool) {
 	return value, true
 }
 
+func decodeJSONStringSlice(raw json.RawMessage) ([]string, bool) {
+	if bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
+		return nil, false
+	}
+	var encoded []json.RawMessage
+	if err := json.Unmarshal(raw, &encoded); err != nil {
+		return nil, false
+	}
+	values := make([]string, len(encoded))
+	for index, item := range encoded {
+		value, ok := decodeJSONString(item)
+		if !ok {
+			return nil, false
+		}
+		values[index] = value
+	}
+	return values, true
+}
+
+func decodeJSONUint64(raw json.RawMessage) (uint64, bool) {
+	if bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
+		return 0, false
+	}
+	var value uint64
+	if err := json.Unmarshal(raw, &value); err != nil {
+		return 0, false
+	}
+	return value, true
+}
+
+func decodeSnapshotMessages(raw []byte) ([]snapshotMessage, error) {
+	var encoded *[]json.RawMessage
+	if err := json.Unmarshal(raw, &encoded); err != nil || encoded == nil {
+		return nil, errInvalidSnapshotMessage
+	}
+	snapshots := make([]snapshotMessage, 0, len(*encoded))
+	for _, message := range *encoded {
+		snapshot, err := decodeSnapshotMessage(message)
+		if err != nil {
+			return nil, err
+		}
+		snapshots = append(snapshots, snapshot)
+	}
+	return snapshots, nil
+}
+
+func decodeSnapshotMessage(raw json.RawMessage) (snapshotMessage, error) {
+	members, ok := decodeJSONObjectMembers(raw)
+	if !ok {
+		return snapshotMessage{}, errInvalidSnapshotMessage
+	}
+	var snapshot snapshotMessage
+	seen := make(map[string]bool, 6)
+	for _, member := range members {
+		switch member.name {
+		case "id", "time", "hostname", "paths", "tags", "summary":
+		default:
+			continue
+		}
+		if seen[member.name] {
+			return snapshotMessage{}, errInvalidSnapshotMessage
+		}
+		seen[member.name] = true
+		switch member.name {
+		case "id":
+			value, ok := decodeJSONString(member.value)
+			if !ok {
+				return snapshotMessage{}, errInvalidSnapshotMessage
+			}
+			snapshot.ID = value
+		case "time":
+			value, ok := decodeJSONString(member.value)
+			if !ok {
+				return snapshotMessage{}, errInvalidSnapshotMessage
+			}
+			snapshot.Time = value
+		case "hostname":
+			value, ok := decodeJSONString(member.value)
+			if !ok {
+				return snapshotMessage{}, errInvalidSnapshotMessage
+			}
+			snapshot.Hostname = value
+		case "paths":
+			value, ok := decodeJSONStringSlice(member.value)
+			if !ok {
+				return snapshotMessage{}, errInvalidSnapshotMessage
+			}
+			snapshot.Paths = value
+		case "tags":
+			value, ok := decodeJSONStringSlice(member.value)
+			if !ok {
+				return snapshotMessage{}, errInvalidSnapshotMessage
+			}
+			snapshot.Tags = value
+		case "summary":
+			summary, err := decodeSnapshotSummary(member.value)
+			if err != nil {
+				return snapshotMessage{}, err
+			}
+			snapshot.Summary = summary
+		}
+	}
+	return snapshot, nil
+}
+
+func decodeSnapshotSummary(raw json.RawMessage) (snapshotSummary, error) {
+	members, ok := decodeJSONObjectMembers(raw)
+	if !ok {
+		return snapshotSummary{}, errInvalidSnapshotMessage
+	}
+	var summary snapshotSummary
+	seen := make(map[string]bool, 2)
+	for _, member := range members {
+		switch member.name {
+		case "total_files_processed", "total_bytes_processed":
+		default:
+			continue
+		}
+		if seen[member.name] {
+			return snapshotSummary{}, errInvalidSnapshotMessage
+		}
+		seen[member.name] = true
+		value, ok := decodeJSONUint64(member.value)
+		if !ok {
+			return snapshotSummary{}, errInvalidSnapshotMessage
+		}
+		if member.name == "total_files_processed" {
+			summary.Files = value
+		} else {
+			summary.Bytes = value
+		}
+	}
+	return summary, nil
+}
+
 func decodeVersionMessage(raw []byte) (string, error) {
 	members, ok := decodeJSONObjectMembers(raw)
 	if !ok {
@@ -797,6 +933,9 @@ func (adapter *Adapter) Acquire(ctx context.Context, request source.AcquireReque
 	}
 	if !filepath.IsAbs(request.Workspace) || filepath.Clean(request.Workspace) != request.Workspace {
 		return source.Artifact{}, &source.Failure{Kind: source.FailureInvalidInput, Operation: "acquire", SafeHint: "acquisition workspace must be a clean absolute path"}
+	}
+	if adapter.config.Repository.Kind == RepositoryLocal && pathInsideOrSame(request.Workspace, adapter.config.Repository.Location) {
+		return source.Artifact{}, &source.Failure{Kind: source.FailureInvalidInput, Operation: "acquire", SafeHint: "acquisition workspace must be outside the local restic repository"}
 	}
 	entries, err := os.ReadDir(request.Workspace)
 	if err != nil || len(entries) != 0 {

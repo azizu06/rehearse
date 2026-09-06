@@ -276,6 +276,142 @@ test "$(find "$RESTIC_PASSWORD_FILE" -perm 0600 -print)" = "$RESTIC_PASSWORD_FIL
 	}
 }
 
+func TestListRecoveryPointsIgnoresCaseVariantAdditiveFields(t *testing.T) {
+	const snapshotID = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+	tests := []struct {
+		name        string
+		nestedField string
+		outerField  string
+	}{
+		{name: "id", outerField: `,"ID":"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"`},
+		{name: "time", outerField: `,"Time":"2025-01-01T00:00:00Z"`},
+		{name: "hostname", outerField: `,"Hostname":"wrong-host"`},
+		{name: "paths", outerField: `,"Paths":["/wrong"]`},
+		{name: "tags", outerField: `,"Tags":["wrong"]`},
+		{name: "summary", outerField: `,"Summary":{"total_files_processed":999,"total_bytes_processed":999}`},
+		{name: "summary files", nestedField: `,"Total_Files_Processed":999`},
+		{name: "summary bytes", nestedField: `,"Total_Bytes_Processed":999`},
+	}
+	want := []source.RecoveryPoint{{
+		ID:        snapshotID,
+		CreatedAt: time.Date(2026, 7, 15, 17, 30, 0, 0, time.UTC),
+		Host:      "db-1",
+		Paths:     []string{"/data"},
+		Tags:      []string{"daily"},
+		Files:     2,
+		Bytes:     128,
+	}}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			output := `[{"id":"` + snapshotID + `","time":"2026-07-15T17:30:00Z","hostname":"db-1","paths":["/data"],"tags":["daily"],"summary":{"total_files_processed":2,"total_bytes_processed":128` + test.nestedField + `,"future_nested":{"safe":true}}` + test.outerField + `,"future_field":{"safe":true}}]`
+			credentialTempDir := t.TempDir()
+			adapter := newTestAdapter(t, resticadapter.Config{
+				Binary:            writeFakeRestic(t, output),
+				Repository:        resticadapter.Repository{Kind: resticadapter.RepositoryLocal, Location: t.TempDir()},
+				Password:          drill.CredentialReference{Provider: drill.CredentialEnvironment, Locator: "REHEARSE_TEST_RESTIC_PASSWORD"},
+				CredentialTempDir: credentialTempDir,
+			})
+
+			points, err := adapter.ListRecoveryPoints(context.Background())
+			if err != nil {
+				t.Fatalf("list recovery points: %v", err)
+			}
+			if !reflect.DeepEqual(points, want) {
+				t.Fatalf("recovery points = %+v, want %+v", points, want)
+			}
+			assertDirectoryEmpty(t, credentialTempDir)
+		})
+	}
+}
+
+func TestListRecoveryPointsRejectsDuplicateKnownFields(t *testing.T) {
+	const snapshotID = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+	tests := []struct {
+		name        string
+		nestedField string
+		outerField  string
+	}{
+		{name: "id", outerField: `,"id":"` + snapshotID + `"`},
+		{name: "time", outerField: `,"time":"2026-07-15T17:30:00Z"`},
+		{name: "hostname", outerField: `,"hostname":"db-1"`},
+		{name: "paths", outerField: `,"paths":["/data"]`},
+		{name: "tags", outerField: `,"tags":["daily"]`},
+		{name: "summary", outerField: `,"summary":{"total_files_processed":2,"total_bytes_processed":128}`},
+		{name: "summary files", nestedField: `,"total_files_processed":2`},
+		{name: "summary bytes", nestedField: `,"total_bytes_processed":128`},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			output := `[{"id":"` + snapshotID + `","time":"2026-07-15T17:30:00Z","hostname":"db-1","paths":["/data"],"tags":["daily"],"summary":{"total_files_processed":2,"total_bytes_processed":128` + test.nestedField + `}` + test.outerField + `}]`
+			credentialTempDir := t.TempDir()
+			adapter := newTestAdapter(t, resticadapter.Config{
+				Binary:            writeFakeRestic(t, output),
+				Repository:        resticadapter.Repository{Kind: resticadapter.RepositoryLocal, Location: t.TempDir()},
+				Password:          drill.CredentialReference{Provider: drill.CredentialEnvironment, Locator: "REHEARSE_TEST_RESTIC_PASSWORD"},
+				CredentialTempDir: credentialTempDir,
+			})
+
+			_, err := adapter.ListRecoveryPoints(context.Background())
+			var failure *source.Failure
+			if !errors.As(err, &failure) || failure.Kind != source.FailureCorruptOutput {
+				t.Fatalf("failure = %+v, want corrupt output", failure)
+			}
+			assertDirectoryEmpty(t, credentialTempDir)
+		})
+	}
+}
+
+func TestListRecoveryPointsRejectsInvalidKnownFieldRepresentations(t *testing.T) {
+	const snapshotID = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+	base := `{"id":"` + snapshotID + `","time":"2026-07-15T17:30:00Z","hostname":"db-1","paths":["/data"],"tags":["daily"],"summary":{"total_files_processed":2,"total_bytes_processed":128}}`
+	tests := []struct {
+		name         string
+		validField   string
+		invalidField string
+	}{
+		{name: "null id", validField: `"id":"` + snapshotID + `"`, invalidField: `"id":null`},
+		{name: "wrong id type", validField: `"id":"` + snapshotID + `"`, invalidField: `"id":7`},
+		{name: "null time", validField: `"time":"2026-07-15T17:30:00Z"`, invalidField: `"time":null`},
+		{name: "wrong time type", validField: `"time":"2026-07-15T17:30:00Z"`, invalidField: `"time":false`},
+		{name: "null hostname", validField: `"hostname":"db-1"`, invalidField: `"hostname":null`},
+		{name: "wrong hostname type", validField: `"hostname":"db-1"`, invalidField: `"hostname":[]`},
+		{name: "null paths", validField: `"paths":["/data"]`, invalidField: `"paths":null`},
+		{name: "wrong paths type", validField: `"paths":["/data"]`, invalidField: `"paths":"/data"`},
+		{name: "null path element", validField: `"paths":["/data"]`, invalidField: `"paths":[null]`},
+		{name: "null tags", validField: `"tags":["daily"]`, invalidField: `"tags":null`},
+		{name: "wrong tags type", validField: `"tags":["daily"]`, invalidField: `"tags":{"name":"daily"}`},
+		{name: "null tag element", validField: `"tags":["daily"]`, invalidField: `"tags":[null]`},
+		{name: "null summary", validField: `"summary":{"total_files_processed":2,"total_bytes_processed":128}`, invalidField: `"summary":null`},
+		{name: "wrong summary type", validField: `"summary":{"total_files_processed":2,"total_bytes_processed":128}`, invalidField: `"summary":[]`},
+		{name: "null summary files", validField: `"total_files_processed":2`, invalidField: `"total_files_processed":null`},
+		{name: "wrong summary files type", validField: `"total_files_processed":2`, invalidField: `"total_files_processed":"2"`},
+		{name: "null summary bytes", validField: `"total_bytes_processed":128`, invalidField: `"total_bytes_processed":null`},
+		{name: "wrong summary bytes type", validField: `"total_bytes_processed":128`, invalidField: `"total_bytes_processed":1.5`},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			output := "[" + strings.Replace(base, test.validField, test.invalidField, 1) + "]"
+			credentialTempDir := t.TempDir()
+			adapter := newTestAdapter(t, resticadapter.Config{
+				Binary:            writeFakeRestic(t, output),
+				Repository:        resticadapter.Repository{Kind: resticadapter.RepositoryLocal, Location: t.TempDir()},
+				Password:          drill.CredentialReference{Provider: drill.CredentialEnvironment, Locator: "REHEARSE_TEST_RESTIC_PASSWORD"},
+				CredentialTempDir: credentialTempDir,
+			})
+
+			_, err := adapter.ListRecoveryPoints(context.Background())
+			var failure *source.Failure
+			if !errors.As(err, &failure) || failure.Kind != source.FailureCorruptOutput {
+				t.Fatalf("failure = %+v, want corrupt output", failure)
+			}
+			assertDirectoryEmpty(t, credentialTempDir)
+		})
+	}
+}
+
 func TestListRejectsNullSnapshotArray(t *testing.T) {
 	t.Parallel()
 
@@ -508,6 +644,130 @@ printf '%s\n' '{"message_type":"summary","Message_Type":"future","files_restored
 	}
 	if len(entries) != 0 {
 		t.Fatalf("credential files remain after acquire: %v", entries)
+	}
+}
+
+func TestAcquireRejectsWorkspaceInsideLocalRepository(t *testing.T) {
+	t.Parallel()
+
+	const recoveryPointID = "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"
+	tests := []struct {
+		name         string
+		workspace    func(t *testing.T, root string, repository string) string
+		wantRejected bool
+	}{
+		{
+			name: "repository",
+			workspace: func(_ *testing.T, _ string, repository string) string {
+				return repository
+			},
+			wantRejected: true,
+		},
+		{
+			name: "direct descendant",
+			workspace: func(t *testing.T, _ string, repository string) string {
+				t.Helper()
+				workspace := filepath.Join(repository, "workspace")
+				if err := os.Mkdir(workspace, 0o700); err != nil {
+					t.Fatalf("create workspace: %v", err)
+				}
+				return workspace
+			},
+			wantRejected: true,
+		},
+		{
+			name: "symlink alias descendant",
+			workspace: func(t *testing.T, root string, repository string) string {
+				t.Helper()
+				workspace := filepath.Join(repository, "workspace")
+				if err := os.Mkdir(workspace, 0o700); err != nil {
+					t.Fatalf("create workspace: %v", err)
+				}
+				alias := filepath.Join(root, "repository-alias")
+				if err := os.Symlink(repository, alias); err != nil {
+					t.Fatalf("create repository alias: %v", err)
+				}
+				return filepath.Join(alias, "workspace")
+			},
+			wantRejected: true,
+		},
+		{
+			name: "sibling prefix",
+			workspace: func(t *testing.T, root string, _ string) string {
+				t.Helper()
+				workspace := filepath.Join(root, "repository-workspace")
+				if err := os.Mkdir(workspace, 0o700); err != nil {
+					t.Fatalf("create workspace: %v", err)
+				}
+				return workspace
+			},
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+
+			root := t.TempDir()
+			repository := filepath.Join(root, "repository")
+			if err := os.Mkdir(repository, 0o700); err != nil {
+				t.Fatalf("create repository: %v", err)
+			}
+			workspace := test.workspace(t, root, repository)
+			credentialTempDir := filepath.Join(root, "credentials")
+			if err := os.Mkdir(credentialTempDir, 0o700); err != nil {
+				t.Fatalf("create credential temp directory: %v", err)
+			}
+			restoreInvoked := filepath.Join(root, "restore-invoked")
+			adapter := newTestAdapter(t, resticadapter.Config{
+				Binary: writeFakeResticScript(t, `
+printf 'invoked' > `+shellQuote(restoreInvoked)+`
+target=""
+while test "$#" -gt 0; do
+  if test "$1" = "--target"; then target="$2"; shift; fi
+  shift
+done
+mkdir -p "$target/data"
+printf 'recovered' > "$target/data/orders.db"
+printf '%s\n' '{"message_type":"summary","files_restored":1,"total_files":1,"bytes_restored":9,"total_bytes":9}'
+`),
+				Repository:        resticadapter.Repository{Kind: resticadapter.RepositoryLocal, Location: repository},
+				Password:          drill.CredentialReference{Provider: drill.CredentialEnvironment, Locator: "REHEARSE_TEST_RESTIC_PASSWORD"},
+				CredentialTempDir: credentialTempDir,
+			})
+			repositoryBefore := snapshotTree(t, repository)
+			workspaceBefore := snapshotTree(t, workspace)
+
+			artifact, err := adapter.Acquire(context.Background(), source.AcquireRequest{
+				RecoveryPointID: recoveryPointID,
+				Workspace:       workspace,
+			})
+			if test.wantRejected {
+				var failure *source.Failure
+				if !errors.As(err, &failure) || failure.Kind != source.FailureInvalidInput {
+					t.Fatalf("failure = %+v, want invalid input", failure)
+				}
+				if _, statErr := os.Stat(restoreInvoked); !errors.Is(statErr, os.ErrNotExist) {
+					t.Fatalf("restore invocation marker error = %v, want not exist", statErr)
+				}
+				if got := snapshotTree(t, repository); !reflect.DeepEqual(got, repositoryBefore) {
+					t.Fatalf("repository changed: got %v, want %v", got, repositoryBefore)
+				}
+				if got := snapshotTree(t, workspace); !reflect.DeepEqual(got, workspaceBefore) {
+					t.Fatalf("workspace changed: got %v, want %v", got, workspaceBefore)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("acquire from sibling workspace: %v", err)
+			}
+			if filepath.Dir(artifact.Path) != workspace {
+				t.Fatalf("artifact path = %q, want child of %q", artifact.Path, workspace)
+			}
+			if got := snapshotTree(t, repository); !reflect.DeepEqual(got, repositoryBefore) {
+				t.Fatalf("repository changed: got %v, want %v", got, repositoryBefore)
+			}
+		})
 	}
 }
 
@@ -2096,6 +2356,42 @@ func assertDirectoryEmpty(t *testing.T, directory string) {
 	if len(entries) != 0 {
 		t.Fatalf("directory %s is not empty: %v", directory, entries)
 	}
+}
+
+func snapshotTree(t *testing.T, root string) map[string]string {
+	t.Helper()
+
+	snapshot := make(map[string]string)
+	err := filepath.Walk(root, func(path string, info os.FileInfo, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		relative, err := filepath.Rel(root, path)
+		if err != nil {
+			return err
+		}
+		value := info.Mode().String()
+		switch {
+		case info.Mode().IsRegular():
+			contents, err := os.ReadFile(path)
+			if err != nil {
+				return err
+			}
+			value += ":" + string(contents)
+		case info.Mode()&os.ModeSymlink != 0:
+			target, err := os.Readlink(path)
+			if err != nil {
+				return err
+			}
+			value += ":" + target
+		}
+		snapshot[relative] = value
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("snapshot %s: %v", root, err)
+	}
+	return snapshot
 }
 
 func waitForPath(t *testing.T, path string) {
