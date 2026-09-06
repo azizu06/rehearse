@@ -39,7 +39,7 @@ The v0.1 fail-closed field set rejects top-level `configs`, `models`, and
 `external_links`, GPUs, `group_add`, host IPC/PID/UTS/network/user namespaces,
 `isolation`, `label_file`, links, caller logging, custom MAC/IP policy,
 `models`, OOM/shm/storage/tmpfs/ulimit policy, lifecycle hooks, ports,
-`privileged`, host-executed `provider`, caller pull/restart policy, custom
+`privileged`, host-executed `provider`, profiles, caller pull/restart policy, custom
 runtime, `secrets`, `security_opt`, sysctls, `use_api_socket`, unsupported
 mounts, image-declared `VOLUME` targets without an attributable named-volume or
 tmpfs mount, and `volumes_from`. Networks also reject attachability, caller

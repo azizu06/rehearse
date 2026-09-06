@@ -264,6 +264,8 @@ func parseAndValidateComposeMode(data []byte, identity identity, enforced *Limit
 			return composeModel{}, unsafeService(name, "custom container names are not allowed")
 		case service.Scale != nil && *service.Scale != 1:
 			return composeModel{}, unsafeService(name, "service scale must be one")
+		case len(service.Profiles) > 0:
+			return composeModel{}, unsafeService(name, "service profiles are not supported")
 		case service.Deploy != nil && service.Deploy.Replicas != nil && *service.Deploy.Replicas != 1:
 			return composeModel{}, unsafeService(name, "deploy replicas must be one")
 		case service.Deploy != nil && service.Deploy.Mode != "" && service.Deploy.Mode != "replicated":

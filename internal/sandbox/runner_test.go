@@ -79,6 +79,7 @@ type runnerDocker struct {
 	imageVolumes        []byte
 	imageVolumeCalls    int
 	imageVolumeErrors   []error
+	profiles            []string
 	includeVolume       bool
 	lateCollision       bool
 	collisionVisible    bool
@@ -117,6 +118,9 @@ func (docker *runnerDocker) run(ctx context.Context, _ int64, args ...string) ([
 			}
 		}
 		service := map[string]any{"image": "alpine"}
+		if docker.profiles != nil {
+			service["profiles"] = docker.profiles
+		}
 		document := map[string]any{"services": map[string]any{"worker": service}}
 		if docker.includeVolume {
 			service["volumes"] = []map[string]any{{"type": "volume", "source": "work", "target": "/work"}}
@@ -500,6 +504,21 @@ func TestRunnerRejectsSelectedImagePlatformMismatch(t *testing.T) {
 	}
 	if command.upCall != nil {
 		t.Fatal("runner started a sandbox with mismatched selected image metadata")
+	}
+}
+
+func TestRunnerRejectsProfiledServiceBeforeResourceCreation(t *testing.T) {
+	command := &runnerDocker{profiles: []string{"optional"}}
+	runner := testRunner(t, command, &recordingCleanupJournal{})
+	_, err := runner.Run(context.Background(), testRunnerRequest("run-profiled-service", time.Minute), func(context.Context, Instance) error {
+		t.Fatal("callback ran for a profiled service")
+		return nil
+	})
+	if !errors.Is(err, ErrUnsafeCompose) {
+		t.Fatalf("Run error = %v, want ErrUnsafeCompose", err)
+	}
+	if len(command.reservationCalls) != 0 || command.upCall != nil || len(command.resources) != 0 {
+		t.Fatalf("profiled service reached Docker creation: reservations=%v up=%v resources=%v", command.reservationCalls, command.upCall, command.resources)
 	}
 }
 

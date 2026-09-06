@@ -19,6 +19,7 @@ func TestComposeSafetyRejectsEscapeAndUnboundedFeatures(t *testing.T) {
 		{name: "long service key", model: fmt.Sprintf(`{"services":{"%s":{"image":"alpine"}}}`, strings.Repeat("a", 27))},
 		{name: "custom container name", model: `{"services":{"worker":{"image":"alpine","container_name":"shared"}}}`},
 		{name: "scale", model: `{"services":{"worker":{"image":"alpine","scale":2}}}`},
+		{name: "service profile", model: `{"services":{"worker":{"image":"alpine","profiles":["optional"]}}}`},
 		{name: "build", model: `{"services":{"worker":{"build":{"context":"."}}}}`},
 		{name: "privileged", model: `{"services":{"worker":{"image":"alpine","privileged":true}}}`},
 		{name: "host network", model: `{"services":{"worker":{"image":"alpine","network_mode":"host"}}}`},
@@ -140,7 +141,7 @@ func (output imageVolumeDocker) run(_ context.Context, _ int64, args ...string) 
 func TestComposeSafetyAcceptsProjectScopedSingleReplicaModel(t *testing.T) {
 	identity, _ := newIdentity("run-1")
 	model := fmt.Sprintf(`{
-		"services":{"worker":{"image":"alpine","scale":1,"networks":{"default":null},"volumes":[{"type":"volume","source":"work","target":"/work"}]}},
+		"services":{"worker":{"image":"alpine","scale":1,"profiles":[],"networks":{"default":null},"volumes":[{"type":"volume","source":"work","target":"/work"}]}},
 		"networks":{"default":{"name":%q}},
 		"volumes":{"work":{"name":%q}}
 	}`, identity.projectName+"_default", identity.projectName+"_work")
