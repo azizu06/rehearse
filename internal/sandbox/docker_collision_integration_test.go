@@ -173,7 +173,7 @@ func TestRealDockerLiveCleanupPreservesRapidVolumeGenerationReplacement(t *testi
 }
 
 func TestRealDockerRunnerCleansContainerCreatedAfterCancelledComposeUp(t *testing.T) {
-	name, err, status := runRealDockerCancelledUp(t, "")
+	name, status, err := runRealDockerCancelledUp(t, "")
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("Run error = %v, want context.Canceled", err)
 	}
@@ -187,7 +187,7 @@ func TestRealDockerRunnerCleansContainerCreatedAfterCancelledComposeUp(t *testin
 
 func TestRealDockerRunnerPreservesLateContainerWithMismatchedGeneration(t *testing.T) {
 	generation := strings.Repeat("f", 64)
-	name, err, status := runRealDockerCancelledUp(t, generation)
+	name, status, err := runRealDockerCancelledUp(t, generation)
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("Run error = %v, want context.Canceled", err)
 	}
@@ -203,7 +203,7 @@ func TestRealDockerRunnerPreservesLateContainerWithMismatchedGeneration(t *testi
 	}
 }
 
-func runRealDockerCancelledUp(t *testing.T, generationOverride string) (string, error, drill.CleanupStatus) {
+func runRealDockerCancelledUp(t *testing.T, generationOverride string) (string, drill.CleanupStatus, error) {
 	t.Helper()
 	if os.Getenv("REHEARSE_DOCKER_INTEGRATION") != "1" {
 		t.Skip("set REHEARSE_DOCKER_INTEGRATION=1 to run real Docker tests")
@@ -240,7 +240,7 @@ func runRealDockerCancelledUp(t *testing.T, generationOverride string) (string, 
 		t.Fatal("callback ran after cancelled Compose up")
 		return nil
 	})
-	return name, err, journal.lastStatus()
+	return name, journal.lastStatus(), err
 }
 
 type lateCollisionRealDocker struct {
