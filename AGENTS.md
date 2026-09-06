@@ -14,6 +14,12 @@ Read `CONTEXT.md`, `PRD.md`, and the relevant ADRs before changing product behav
 
 ## Verification
 
+Select checks for the changed surface; the list below is not a requirement to
+install absent stacks or run every tool for a documentation-only change. Use
+current CI and repository configuration to identify required gates. Documentation
+changes need source/link verification and `git diff --check`; behavior changes
+need acceptance evidence and the applicable checks below.
+
 - Go: `go test ./...`, `go test -race ./...`, table-driven tests, `httptest`, targeted fuzzing, and Testcontainers at external boundaries.
 - Web: Vitest + React Testing Library for components and Playwright for critical recovery flows.
 - Infrastructure: `terraform fmt -check`, `terraform validate`, and TFLint.
@@ -33,3 +39,9 @@ Use the standard five-label triage state machine. See `docs/agents/triage-labels
 ### Domain docs
 
 This is a single-context repository with root `CONTEXT.md` and `docs/adr/`. See `docs/agents/domain.md`.
+
+## Graphify
+
+Use an existing current graph only when it helps a cross-module investigation,
+and verify conclusions against source. A missing graph does not block targeted
+source inspection. Do not generate or commit graph output for routine edits.
