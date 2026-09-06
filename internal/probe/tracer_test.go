@@ -59,6 +59,9 @@ func TestHTTPRetryProducesSuccessfulCanonicalReport(t *testing.T) {
 	if detail := result.Probes[0].Detail; detail != "" {
 		t.Fatalf("successful retry detail = %q, want empty", detail)
 	}
+	if observed := result.Probes[0].Observed; observed != "HTTP 204" {
+		t.Fatalf("successful retry observed = %q, want final passing attempt", observed)
+	}
 
 	startedAt := time.Date(2026, time.July, 15, 18, 0, 0, 0, time.UTC)
 	probeEvidence := result.Probes[0]

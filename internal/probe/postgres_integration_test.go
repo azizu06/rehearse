@@ -67,8 +67,10 @@ func TestPostgreSQLProbeEnforcesReadOnlySingleStatementAndLeastPrivilege(t *test
 		query      string
 		expected   string
 		wantStatus probe.Status
+		observed   string
 	}{
-		{name: "scalar select", query: `SELECT count(*)::text FROM restored_orders`, expected: "1", wantStatus: probe.StatusPassed},
+		{name: "scalar select", query: `SELECT count(*)::text FROM restored_orders`, expected: "1", wantStatus: probe.StatusPassed, observed: "1"},
+		{name: "scalar mismatch", query: `SELECT count(*)::text FROM restored_orders`, expected: "2", wantStatus: probe.StatusFailed, observed: "1"},
 		{name: "stacked statements", query: `SELECT '1'; SELECT '2'`, expected: "1", wantStatus: probe.StatusFailed},
 		{name: "insert", query: `INSERT INTO restored_orders(id) VALUES (43) RETURNING id::text`, expected: "43", wantStatus: probe.StatusFailed},
 		{name: "ddl", query: `CREATE TABLE forbidden_table(id bigint)`, expected: "", wantStatus: probe.StatusFailed},
@@ -91,6 +93,9 @@ func TestPostgreSQLProbeEnforcesReadOnlySingleStatementAndLeastPrivilege(t *test
 			result := probe.NewRunner(probe.Options{SQLConnections: map[string]*pgxpool.Pool{"restored-db": connection}}).Run(ctx, configuration)
 			if got := result.Probes[0].Status; got != test.wantStatus {
 				t.Fatalf("status = %q, want %q: %#v", got, test.wantStatus, result.Probes[0])
+			}
+			if got := result.Probes[0].Observed; got != test.observed {
+				t.Fatalf("observed = %q, want %q", got, test.observed)
 			}
 		})
 	}

@@ -18,6 +18,7 @@ import (
 
 const commandSecretMarker = "issue-10-command-secret"
 const boundarySecretMarker = "xYz987"
+const failedCommandSecretMarker = "issue-10-failed-command-secret"
 
 func TestTrustedCommandAndDataAssertionAreBoundedAndRedacted(t *testing.T) {
 	t.Setenv("REHEARSE_SHOULD_NOT_BE_INHERITED", "ambient-secret")
@@ -132,6 +133,60 @@ func TestCommandRedactsMarkerAcrossCaptureBoundary(t *testing.T) {
 	if strings.Contains(result.Probes[0].Observed, boundarySecretMarker) || strings.Contains(result.Probes[0].Observed, "xY") {
 		t.Fatalf("command evidence leaked boundary marker: %q", result.Probes[0].Observed)
 	}
+}
+
+func TestFailedCommandRetainsBoundedRedactedObservedOutput(t *testing.T) {
+	t.Parallel()
+
+	executable, err := os.Executable()
+	if err != nil {
+		t.Fatalf("os.Executable() error = %v", err)
+	}
+	configuration, err := probe.ParseConfig(strings.NewReader(fmt.Sprintf(`{
+  "schema_version":"rehearse.probes/v1",
+  "probes":[{
+    "ordinal":1,"id":"failed-command","kind":"command","required":true,
+    "retry":{"deadline":"3s","backoff":"10ms","max_attempts":1},
+    "command":{"executable":%q,"args":["-test.run=TestProbeFailedCommandEvidenceHelper","--","failed-command-helper"],"expected_exit_code":0,"trust_acknowledged":true}
+  }]
+}`, executable)))
+	if err != nil {
+		t.Fatalf("ParseConfig() error = %v", err)
+	}
+	result := probe.NewRunner(probe.Options{Redactor: redact.New(failedCommandSecretMarker)}).Run(context.Background(), configuration)
+	evidence := result.Probes[0]
+	if evidence.Status != probe.StatusFailed || evidence.Attempts != 1 || evidence.ExhaustedBy != probe.ExhaustedAttempts {
+		t.Fatalf("Runner.Run() failed command evidence = %#v", evidence)
+	}
+	if !strings.Contains(evidence.Observed, redact.Replacement) || strings.Contains(evidence.Observed, failedCommandSecretMarker) {
+		t.Errorf("Runner.Run() failed command observed = %q, want bounded redacted output", evidence.Observed)
+	}
+	if !strings.Contains(evidence.Detail, "command exit code 7") {
+		t.Errorf("Runner.Run() failed command detail = %q, want exit code 7", evidence.Detail)
+	}
+	if !evidence.StdoutTruncated || evidence.StderrTruncated || !evidence.Truncated {
+		t.Errorf("Runner.Run() failed command truncation = stdout:%t stderr:%t aggregate:%t", evidence.StdoutTruncated, evidence.StderrTruncated, evidence.Truncated)
+	}
+}
+
+func TestProbeFailedCommandEvidenceHelper(t *testing.T) {
+	isHelper := false
+	for _, argument := range os.Args {
+		if argument == "failed-command-helper" {
+			isHelper = true
+			break
+		}
+	}
+	if !isHelper {
+		t.Skip("helper process only")
+	}
+	if _, err := fmt.Fprint(os.Stdout, failedCommandSecretMarker+strings.Repeat("o", 20<<10)); err != nil {
+		t.Fatalf("write stdout: %v", err)
+	}
+	if _, err := fmt.Fprint(os.Stderr, "failed stderr"); err != nil {
+		t.Fatalf("write stderr: %v", err)
+	}
+	os.Exit(7)
 }
 
 func TestProbeCommandRedactionBoundaryHelper(t *testing.T) {

@@ -424,7 +424,10 @@ func (runner *Runner) runAttempts(parent context.Context, spec Spec, attempt fun
 			break
 		}
 		if err != nil {
-			evidence.Detail, evidence.Truncated = runner.redactor.BoundedString(err.Error(), maxObservedBytes)
+			var observedTruncated, detailTruncated bool
+			evidence.Observed, observedTruncated = runner.redactor.BoundedString(observed, 33<<10)
+			evidence.Detail, detailTruncated = runner.redactor.BoundedString(err.Error(), maxObservedBytes)
+			evidence.Truncated = observedTruncated || detailTruncated
 		}
 		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
 			evidence.ExhaustedBy = ExhaustedDeadline
