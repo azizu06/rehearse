@@ -23,6 +23,8 @@ import (
 	"github.com/azizu06/rehearse/internal/redact"
 )
 
+const persistedReportSecretMarker = "issue-10-persisted-secret"
+
 func TestCommandBoundaryEvidenceRemainsRedactedThroughRestartAndAPI(t *testing.T) {
 	t.Parallel()
 
@@ -31,9 +33,9 @@ func TestCommandBoundaryEvidenceRemainsRedactedThroughRestartAndAPI(t *testing.T
 	if err != nil {
 		t.Fatalf("os.Executable() error = %v", err)
 	}
-	secret := "issue-10-persisted-secret"
+	secret := persistedReportSecretMarker
 	boundaryMarker := commandReportBoundaryMarker()
-	redactor := redact.New(secret, boundaryMarker)
+	redactor := redact.New(secret, boundaryMarker, "RE", "A")
 	planID := "Plan.ID_雪 with space " + strings.Repeat("p", 128)
 	runID := "Run/ID_雪 with space/" + strings.Repeat("r", 128)
 	directory := t.TempDir()
@@ -90,13 +92,33 @@ func TestCommandBoundaryEvidenceRemainsRedactedThroughRestartAndAPI(t *testing.T
 	probeResult.Probes[0].StartedAt = startedAt.Add(5 * time.Second)
 	probeResult.Probes[0].FinishedAt = startedAt.Add(6 * time.Second)
 	probeResult.Probes[0].Duration = time.Second
+	runnerObserved := probeResult.Probes[0].Observed
+	if !strings.Contains(runnerObserved, redact.Replacement) {
+		t.Fatalf("Runner.Run() observed = %q, want replacement token", runnerObserved)
+	}
 	report := evidence.Report{
 		SchemaVersion: evidence.SchemaVersion,
 		RunID:         run.ID, PlanID: plan.ID, PlanVersion: plan.Version,
 		RecoveryPoint: evidence.RecoveryPoint{ID: "snapshot-" + secret, SelectedAt: startedAt},
-		Stages:        []evidence.Stage{{Ordinal: 1, Name: drill.StageProbe, StartedAt: startedAt.Add(5 * time.Second), FinishedAt: startedAt.Add(6 * time.Second), Duration: time.Second}},
-		Probes:        probeResult.Probes,
-		Outcome:       run.Outcome, Cleanup: run.Cleanup,
+		Stages: explicitStageEvidence(t,
+			[]drill.Stage{drill.StageQueued, drill.StagePreflight, drill.StageAcquire, drill.StageRestore, drill.StageBoot, drill.StageProbe, drill.StageReport, drill.StageCleanup},
+			startedAt,
+			startedAt.Add(time.Second),
+			startedAt.Add(2*time.Second),
+			startedAt.Add(3*time.Second),
+			startedAt.Add(4*time.Second),
+			startedAt.Add(5*time.Second),
+			startedAt.Add(6*time.Second),
+			startedAt.Add(7*time.Second),
+			startedAt.Add(8*time.Second),
+		),
+		Probes:  probeResult.Probes,
+		Outcome: run.Outcome, Cleanup: run.Cleanup,
+	}
+	omittedStage := report
+	omittedStage.Stages = omitCompletedStage(report.Stages, drill.StagePreflight)
+	if err := store.SaveReport(ctx, omittedStage, redactor); !errors.Is(err, evidence.ErrInvalidReport) {
+		t.Fatalf("SaveReport accepted omitted completed stage: %v", err)
 	}
 	forged := report
 	forged.Probes = append([]probe.Evidence(nil), report.Probes...)
@@ -147,6 +169,9 @@ func TestCommandBoundaryEvidenceRemainsRedactedThroughRestartAndAPI(t *testing.T
 		t.Fatalf("Report: %v", err)
 	}
 	assertBoundedCommandEvidence(t, loadedReport.Probes[0].Observed, boundaryMarker)
+	if loadedReport.Probes[0].Observed != runnerObserved {
+		t.Fatalf("Report() observed = %q, want Runner.Run() observed %q", loadedReport.Probes[0].Observed, runnerObserved)
+	}
 	handler := controlplane.NewHandler(controlplane.Options{ReportReader: reopened, Redactor: redactor})
 	request := httptest.NewRequest(http.MethodGet, "/api/v1/runs/"+url.PathEscape(run.ID)+"/report", nil)
 	response := httptest.NewRecorder()
@@ -159,6 +184,9 @@ func TestCommandBoundaryEvidenceRemainsRedactedThroughRestartAndAPI(t *testing.T
 		t.Fatalf("decode report API error = %v", err)
 	}
 	assertBoundedCommandEvidence(t, apiView.Snapshot.Probes[0].Observed, boundaryMarker)
+	if apiView.Snapshot.Probes[0].Observed != runnerObserved {
+		t.Fatalf("report API observed = %q, want Runner.Run() observed %q", apiView.Snapshot.Probes[0].Observed, runnerObserved)
+	}
 	encoded, err := loadedReport.CanonicalJSON(redactor)
 	if err != nil {
 		t.Fatalf("CanonicalJSON: %v", err)
@@ -238,11 +266,30 @@ func TestTerminalReportsPersistUnattemptedProbeEvidence(t *testing.T) {
 			if err != nil {
 				t.Fatalf("RecordCleanup() error = %v", err)
 			}
+			reportStages := explicitStageEvidence(t,
+				[]drill.Stage{drill.StageQueued, drill.StagePreflight, drill.StageAcquire, drill.StageRestore, drill.StageBoot, drill.StageProbe, drill.StageCleanup},
+				startedAt.Add(offset),
+				startedAt.Add(offset+time.Second),
+				startedAt.Add(offset+2*time.Second),
+				startedAt.Add(offset+3*time.Second),
+				startedAt.Add(offset+4*time.Second),
+				startedAt.Add(offset+5*time.Second),
+				outcomeAt,
+				outcomeAt.Add(time.Second),
+			)
+			if test.beforeProbes {
+				reportStages = explicitStageEvidence(t,
+					[]drill.Stage{drill.StageQueued, drill.StageCleanup},
+					startedAt.Add(offset),
+					outcomeAt,
+					outcomeAt.Add(time.Second),
+				)
+			}
 			report := evidence.Report{
 				SchemaVersion: evidence.SchemaVersion,
 				RunID:         run.ID, PlanID: plan.ID, PlanVersion: plan.Version,
 				RecoveryPoint: evidence.RecoveryPoint{ID: "snapshot-terminal", SelectedAt: startedAt.Add(offset)},
-				Stages:        []evidence.Stage{stageEvidence},
+				Stages:        reportStages,
 				Probes:        probeEvidence,
 				Outcome:       run.Outcome, Cleanup: run.Cleanup,
 			}
@@ -392,9 +439,14 @@ func TestSaveReportAndCleanupRetryPublishOneConsistentOrder(t *testing.T) {
 			SchemaVersion: evidence.SchemaVersion,
 			RunID:         run.ID, PlanID: plan.ID, PlanVersion: plan.Version,
 			RecoveryPoint: evidence.RecoveryPoint{ID: "snapshot-ordering", SelectedAt: runStartedAt},
-			Stages:        []evidence.Stage{{Ordinal: 1, Name: drill.StageQueued, StartedAt: runStartedAt, FinishedAt: runStartedAt.Add(time.Second), Duration: time.Second}},
-			Probes:        []probe.Evidence{{Ordinal: 1, ID: "never-started", Kind: probe.KindHTTP, Required: false, Status: probe.StatusNotAttempted}},
-			Outcome:       run.Outcome, Cleanup: run.Cleanup,
+			Stages: explicitStageEvidence(t,
+				[]drill.Stage{drill.StageQueued, drill.StageCleanup},
+				runStartedAt,
+				runStartedAt.Add(time.Second),
+				runStartedAt.Add(2*time.Second),
+			),
+			Probes:  []probe.Evidence{{Ordinal: 1, ID: "never-started", Kind: probe.KindHTTP, Required: false, Status: probe.StatusNotAttempted}},
+			Outcome: run.Outcome, Cleanup: run.Cleanup,
 		}
 		start := make(chan struct{})
 		saveResult := make(chan error, 1)
@@ -489,9 +541,19 @@ func TestParentDeadlineRunnerEvidencePersistsAsTimedOut(t *testing.T) {
 		SchemaVersion: evidence.SchemaVersion,
 		RunID:         run.ID, PlanID: plan.ID, PlanVersion: plan.Version,
 		RecoveryPoint: evidence.RecoveryPoint{ID: "snapshot-parent-deadline", SelectedAt: startedAt},
-		Stages:        []evidence.Stage{{Ordinal: 1, Name: drill.StageProbe, StartedAt: probeStageAt, FinishedAt: outcomeAt, Duration: outcomeAt.Sub(probeStageAt)}},
-		Probes:        result.Probes,
-		Outcome:       run.Outcome, Cleanup: run.Cleanup,
+		Stages: explicitStageEvidence(t,
+			[]drill.Stage{drill.StageQueued, drill.StagePreflight, drill.StageAcquire, drill.StageRestore, drill.StageBoot, drill.StageProbe, drill.StageCleanup},
+			startedAt,
+			probeStageAt,
+			probeStageAt,
+			probeStageAt,
+			probeStageAt,
+			probeStageAt,
+			outcomeAt,
+			outcomeAt,
+		),
+		Probes:  result.Probes,
+		Outcome: run.Outcome, Cleanup: run.Cleanup,
 	}
 	if err := store.SaveReport(ctx, report, redact.Redactor{}); err != nil {
 		t.Fatalf("SaveReport() error = %v", err)
@@ -515,6 +577,38 @@ func (successfulJournalResponseAfterContextDoneTransport) RoundTrip(request *htt
 		Body:       http.NoBody,
 		Request:    request,
 	}, nil
+}
+
+func explicitStageEvidence(t *testing.T, names []drill.Stage, boundaries ...time.Time) []evidence.Stage {
+	t.Helper()
+	if len(boundaries) != len(names)+1 {
+		t.Fatalf("stage fixture has %d names and %d boundaries", len(names), len(boundaries))
+	}
+	stages := make([]evidence.Stage, 0, len(names))
+	for index, name := range names {
+		startedAt := boundaries[index]
+		finishedAt := boundaries[index+1]
+		stages = append(stages, evidence.Stage{
+			Ordinal:    index + 1,
+			Name:       name,
+			StartedAt:  startedAt,
+			FinishedAt: finishedAt,
+			Duration:   finishedAt.Sub(startedAt),
+		})
+	}
+	return stages
+}
+
+func omitCompletedStage(stages []evidence.Stage, omitted drill.Stage) []evidence.Stage {
+	result := make([]evidence.Stage, 0, len(stages)-1)
+	for _, stage := range stages {
+		if stage.Name == omitted {
+			continue
+		}
+		stage.Ordinal = len(result) + 1
+		result = append(result, stage)
+	}
+	return result
 }
 
 func commandReportBoundaryMarker() string {
@@ -547,7 +641,8 @@ func TestProbeCommandReportBoundaryHelper(t *testing.T) {
 		t.Skip("helper process only")
 	}
 	marker := commandReportBoundaryMarker()
-	if _, err := fmt.Fprint(os.Stdout, strings.Repeat("o", (16<<10)+len(marker)-2)+marker); err != nil {
+	padding := (16 << 10) + len(marker) - 2 - len(persistedReportSecretMarker)
+	if _, err := fmt.Fprint(os.Stdout, persistedReportSecretMarker+strings.Repeat("o", padding)+marker); err != nil {
 		t.Fatalf("write stdout: %v", err)
 	}
 }

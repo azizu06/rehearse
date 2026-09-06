@@ -27,3 +27,29 @@ func TestBoundedStringDoesNotExposeMarkerPrefixAfterEarlierRedactions(t *testing
 		t.Fatalf("bounded redaction leaked marker prefix: %q", got)
 	}
 }
+
+func TestRedactionIsIdempotentWhenMarkersOverlapReplacement(t *testing.T) {
+	t.Parallel()
+
+	redactor := redact.New("secret", "sec", "RE", "A")
+	first := redactor.String("secret A RE " + redact.Replacement)
+	second := redactor.String(first)
+	if second != first {
+		t.Fatalf("String(String(value)) = %q, want %q", second, first)
+	}
+	if got, want := first, strings.Repeat(redact.Replacement+" ", 3)+redact.Replacement; got != want {
+		t.Fatalf("String(value) = %q, want %q", got, want)
+	}
+	bounded, truncated := redactor.BoundedString("A-A-A", 15)
+	if !truncated {
+		t.Fatal("BoundedString() truncated = false, want true")
+	}
+	repeated, _ := redactor.BoundedString(bounded, 15)
+	if repeated != bounded || len(repeated) > 15 {
+		t.Fatalf("BoundedString(BoundedString(value)) = %q, want bounded %q", repeated, bounded)
+	}
+	spanning := redact.New("prefix"+redact.Replacement+"suffix", "RE")
+	if got := spanning.String("prefix" + redact.Replacement + "suffix"); got != redact.Replacement {
+		t.Fatalf("String(marker spanning replacement) = %q, want %q", got, redact.Replacement)
+	}
+}

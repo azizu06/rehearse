@@ -81,7 +81,14 @@ type stageBounds struct {
 func validateReportHistory(events []drill.Event, report evidence.Report) error {
 	bounds := make(map[drill.Stage]stageBounds)
 	var active drill.Stage
+	snapshotMatched := false
 	for _, event := range events {
+		if event.Sequence > report.SnapshotSequence {
+			break
+		}
+		if event.Sequence == report.SnapshotSequence {
+			snapshotMatched = event.OccurredAt.Equal(report.SnapshotAt)
+		}
 		switch event.Kind {
 		case drill.EventRunCreated:
 			active = drill.StageQueued
@@ -108,9 +115,32 @@ func validateReportHistory(events []drill.Event, report evidence.Report) error {
 			bounds[drill.StageCleanup] = current
 		}
 	}
-	for _, stage := range report.Stages {
-		known, ok := bounds[stage.Name]
-		if !ok || known.finishedAt.IsZero() || !stage.StartedAt.Equal(known.startedAt) || !stage.FinishedAt.Equal(known.finishedAt) {
+	if !snapshotMatched {
+		return fmt.Errorf("%w: report snapshot contradicts run history", evidence.ErrInvalidReport)
+	}
+	expectedNames := []drill.Stage{
+		drill.StageQueued,
+		drill.StagePreflight,
+		drill.StageAcquire,
+		drill.StageRestore,
+		drill.StageBoot,
+		drill.StageProbe,
+		drill.StageReport,
+		drill.StageCleanup,
+	}
+	expected := make([]drill.Stage, 0, len(expectedNames))
+	for _, name := range expectedNames {
+		if known, ok := bounds[name]; ok && !known.finishedAt.IsZero() {
+			expected = append(expected, name)
+		}
+	}
+	if len(report.Stages) != len(expected) {
+		return fmt.Errorf("%w: report omits completed run stages", evidence.ErrInvalidReport)
+	}
+	for index, name := range expected {
+		stage := report.Stages[index]
+		known := bounds[name]
+		if stage.Name != name || !stage.StartedAt.Equal(known.startedAt) || !stage.FinishedAt.Equal(known.finishedAt) {
 			return fmt.Errorf("%w: report stage contradicts run history", evidence.ErrInvalidReport)
 		}
 	}

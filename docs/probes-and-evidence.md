@@ -63,7 +63,9 @@ anchored by `snapshot_sequence` and `snapshot_at`. The report API returns that
 document under `snapshot` plus a `current_cleanup` annotation read from the same
 journal transaction. The annotation contains `status`, `as_of_sequence`, and
 `as_of`; `pending` means a cleanup retry is active, while the snapshot keeps the
-original failed or successful cleanup evidence unchanged.
+original failed or successful cleanup evidence unchanged. If snapshot capture
+follows cleanup retries, its cleanup stage measures from the run outcome through
+the cleanup completion represented by that snapshot.
 
 The real PostgreSQL verification is available through:
 

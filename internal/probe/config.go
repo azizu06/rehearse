@@ -149,7 +149,14 @@ func (config Config) CanonicalJSON() ([]byte, error) {
 			HTTP:  item.HTTP, TCP: item.TCP, Command: item.Command, Data: item.Data, SQL: item.SQL,
 		})
 	}
-	return json.Marshal(wire)
+	encoded, err := json.Marshal(wire)
+	if err != nil {
+		return nil, err
+	}
+	if len(encoded) > maxConfigBytes {
+		return nil, fmt.Errorf("%w: document exceeds %d bytes", ErrInvalidConfig, maxConfigBytes)
+	}
+	return encoded, nil
 }
 
 // ParseConfigBytes is the persistence counterpart to ParseConfig.

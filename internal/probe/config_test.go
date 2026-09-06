@@ -4,6 +4,7 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/azizu06/rehearse/internal/probe"
 )
@@ -27,6 +28,39 @@ func TestConfigRejectsBoundsAndUntrustedCommands(t *testing.T) {
 			t.Parallel()
 			if _, err := probe.ParseConfig(strings.NewReader(test.json)); !errors.Is(err, probe.ErrInvalidConfig) {
 				t.Fatalf("ParseConfig error = %v, want ErrInvalidConfig", err)
+			}
+		})
+	}
+}
+
+func TestCanonicalConfigRejectsOversizedProgrammaticDocument(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		args []string
+	}{
+		{name: "valid maximum command arguments exceed aggregate document cap", args: make([]string, 64)},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			for index := range test.args {
+				test.args[index] = strings.Repeat("a", 4096)
+			}
+			config := probe.Config{
+				SchemaVersion: probe.SchemaVersion,
+				Probes: []probe.Spec{{
+					Ordinal: 1, ID: "large-command", Kind: probe.KindCommand, Required: true,
+					Retry:   probe.RetryPolicy{Deadline: time.Second, Backoff: 10 * time.Millisecond, MaxAttempts: 1},
+					Command: &probe.CommandSpec{Executable: "/usr/bin/true", Args: test.args, ExpectedExitCode: 0, TrustAcknowledged: true},
+				}},
+			}
+			if err := config.Validate(); err != nil {
+				t.Fatalf("Validate() error = %v, want individually valid command bounds", err)
+			}
+			if encoded, err := config.CanonicalJSON(); !errors.Is(err, probe.ErrInvalidConfig) || encoded != nil {
+				t.Fatalf("CanonicalJSON() bytes = %d error = %v, want nil and ErrInvalidConfig", len(encoded), err)
 			}
 		})
 	}

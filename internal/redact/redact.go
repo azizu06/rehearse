@@ -39,10 +39,23 @@ func New(markers ...string) Redactor {
 
 // String returns value with every configured marker replaced.
 func (redactor Redactor) String(value string) string {
-	for _, marker := range redactor.markers {
-		value = strings.ReplaceAll(value, marker, Replacement)
+	if len(redactor.markers) == 0 {
+		return value
 	}
-	return value
+	sentinel := redactor.sentinel(value)
+	deferred := make([]string, 0, len(redactor.markers))
+	for _, marker := range redactor.markers {
+		if strings.Contains(Replacement, marker) {
+			deferred = append(deferred, marker)
+			continue
+		}
+		value = strings.ReplaceAll(value, marker, sentinel)
+	}
+	value = strings.ReplaceAll(value, Replacement, sentinel)
+	for _, marker := range deferred {
+		value = strings.ReplaceAll(value, marker, sentinel)
+	}
+	return strings.ReplaceAll(value, sentinel, Replacement)
 }
 
 // MaxMarkerBytes reports the extra source bytes needed to redact a marker that
@@ -65,6 +78,7 @@ func (redactor Redactor) BoundedString(value string, limit int) (string, bool) {
 	value = redactor.String(value)
 	if len(value) > limit {
 		value = value[:limit]
+		value = trimReplacementPrefix(value)
 		truncated = true
 	}
 	return value, truncated
@@ -82,4 +96,28 @@ func (redactor Redactor) trimMarkerPrefix(value string) string {
 		}
 	}
 	return value[:len(value)-trim]
+}
+
+func (redactor Redactor) sentinel(value string) string {
+	sentinel := "\x00"
+	for {
+		available := !strings.Contains(value, sentinel)
+		for _, marker := range redactor.markers {
+			available = available && !strings.Contains(marker, sentinel)
+		}
+		if available {
+			return sentinel
+		}
+		sentinel += "\x00"
+	}
+}
+
+func trimReplacementPrefix(value string) string {
+	maximum := min(len(Replacement)-1, len(value))
+	for length := maximum; length > 0; length-- {
+		if strings.HasSuffix(value, Replacement[:length]) {
+			return value[:len(value)-length]
+		}
+	}
+	return value
 }
