@@ -27,6 +27,56 @@ func TestReportRejectsSuccessfulOutcomeWithRequiredProbeFailure(t *testing.T) {
 	if err := report.Validate(); err != nil {
 		t.Fatalf("optional failure changed successful report truth: %v", err)
 	}
+
+	report = validReport()
+	report.Probes[0].Status = probe.StatusNotAttempted
+	report.Probes[0].Attempts = 0
+	report.Probes[0].StartedAt = time.Time{}
+	report.Probes[0].FinishedAt = time.Time{}
+	report.Probes[0].Duration = 0
+	if err := report.Validate(); !errors.Is(err, evidence.ErrInvalidReport) {
+		t.Fatalf("required unattempted probe error = %v, want ErrInvalidReport", err)
+	}
+	report.Probes[0].Required = false
+	if err := report.Validate(); err != nil {
+		t.Fatalf("optional unattempted probe changed successful report truth: %v", err)
+	}
+}
+
+func TestReportRejectsInvalidIdentity(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name   string
+		mutate func(*evidence.Report)
+	}{
+		{name: "run ID", mutate: func(report *evidence.Report) { report.RunID = string([]byte{0xff}) }},
+		{name: "blank run ID", mutate: func(report *evidence.Report) { report.RunID = " " }},
+		{name: "plan ID", mutate: func(report *evidence.Report) { report.PlanID = string([]byte{0xff}) }},
+		{name: "blank plan ID", mutate: func(report *evidence.Report) { report.PlanID = "\t" }},
+		{name: "recovery point ID", mutate: func(report *evidence.Report) { report.RecoveryPoint.ID = string([]byte{0xff}) }},
+		{name: "blank recovery point ID", mutate: func(report *evidence.Report) { report.RecoveryPoint.ID = " " }},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			report := validReport()
+			test.mutate(&report)
+			err := report.Validate()
+			if !errors.Is(err, evidence.ErrInvalidReport) {
+				t.Fatalf("Validate() error = %v, want ErrInvalidReport", err)
+			}
+			if !errors.Is(err, drill.ErrInvalidIdentity) {
+				t.Fatalf("Validate() error = %v, want ErrInvalidIdentity", err)
+			}
+		})
+	}
+	report := validReport()
+	invalidIdentity := string([]byte{0xff})
+	report.RecoveryPoint.ID = invalidIdentity
+	if _, err := report.CanonicalJSON(redact.New(invalidIdentity)); !errors.Is(err, drill.ErrInvalidIdentity) {
+		t.Fatalf("CanonicalJSON() error = %v, want ErrInvalidIdentity before redaction", err)
+	}
 }
 
 func TestCanonicalReportPreservesContiguousSemanticOrder(t *testing.T) {

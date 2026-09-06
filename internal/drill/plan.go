@@ -8,12 +8,15 @@ import (
 	"regexp"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/azizu06/rehearse/internal/probe"
 )
 
 // ErrInvalidPlan identifies a plan that cannot safely enter the journal.
 var ErrInvalidPlan = errors.New("invalid drill plan")
+
+var ErrInvalidIdentity = errors.New("invalid text identity")
 
 // CredentialProvider identifies a supported out-of-band secret lookup.
 type CredentialProvider string
@@ -61,6 +64,8 @@ func (plan Plan) Validate() error {
 	switch {
 	case strings.TrimSpace(plan.ID) == "":
 		return fmt.Errorf("%w: id is required", ErrInvalidPlan)
+	case !utf8.ValidString(plan.ID):
+		return fmt.Errorf("%w: id: %w", ErrInvalidPlan, ErrInvalidIdentity)
 	case strings.TrimSpace(plan.Name) == "":
 		return fmt.Errorf("%w: name is required", ErrInvalidPlan)
 	case plan.Version < 1:

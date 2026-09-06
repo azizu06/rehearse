@@ -43,10 +43,11 @@ const (
 type Status string
 
 const (
-	StatusPassed    Status = "passed"
-	StatusFailed    Status = "failed"
-	StatusTimedOut  Status = "timed_out"
-	StatusCancelled Status = "cancelled"
+	StatusPassed       Status = "passed"
+	StatusFailed       Status = "failed"
+	StatusTimedOut     Status = "timed_out"
+	StatusCancelled    Status = "cancelled"
+	StatusNotAttempted Status = "not_attempted"
 )
 
 // RetryPolicy bounds retries by attempts and one shared absolute deadline.

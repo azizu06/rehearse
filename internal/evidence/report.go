@@ -9,7 +9,9 @@ import (
 	"io"
 	"regexp"
 	"sort"
+	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/azizu06/rehearse/internal/drill"
 	"github.com/azizu06/rehearse/internal/probe"
@@ -25,7 +27,7 @@ var ErrInvalidReport = errors.New("invalid evidence report")
 
 var ErrReportNotFound = errors.New("evidence report not found")
 
-var evidenceIDPattern = regexp.MustCompile(`^[a-z][a-z0-9-]{0,63}$`)
+var probeIDPattern = regexp.MustCompile(`^[a-z][a-z0-9-]{0,63}$`)
 
 type RecoveryPoint struct {
 	ID         string    `json:"id"`
@@ -54,7 +56,10 @@ type Report struct {
 }
 
 func (report Report) Validate() error {
-	if report.SchemaVersion != SchemaVersion || !evidenceIDPattern.MatchString(report.RunID) || !evidenceIDPattern.MatchString(report.PlanID) || report.PlanVersion < 1 || report.RecoveryPoint.ID == "" || len(report.RecoveryPoint.ID) > 512 || report.RecoveryPoint.SelectedAt.IsZero() {
+	if err := report.validateIdentities(); err != nil {
+		return err
+	}
+	if report.SchemaVersion != SchemaVersion || strings.TrimSpace(report.RunID) == "" || len(report.RunID) > maxReportBytes || strings.TrimSpace(report.PlanID) == "" || len(report.PlanID) > maxReportBytes || report.PlanVersion < 1 || report.RecoveryPoint.ID == "" || len(report.RecoveryPoint.ID) > 512 || report.RecoveryPoint.SelectedAt.IsZero() {
 		return ErrInvalidReport
 	}
 	if !validOutcome(report.Outcome) || (report.Cleanup != drill.CleanupSucceeded && report.Cleanup != drill.CleanupFailed) {
@@ -75,8 +80,15 @@ func (report Report) Validate() error {
 		previousStageRank = rank
 	}
 	for index, item := range sortedProbes(report.Probes) {
-		if item.Ordinal != index+1 || !evidenceIDPattern.MatchString(item.ID) || item.Attempts < 1 || item.Attempts > 100 || !validProbeKind(item.Kind) || !validProbeStatus(item.Status) || len(item.Observed) > 33<<10 || len(item.Detail) > 16<<10 || item.StartedAt.IsZero() || item.FinishedAt.Before(item.StartedAt) || item.Duration != item.FinishedAt.Sub(item.StartedAt) {
+		if item.Ordinal != index+1 || !probeIDPattern.MatchString(item.ID) || item.Attempts > 100 || !validProbeKind(item.Kind) || !validProbeStatus(item.Status) || len(item.Observed) > 33<<10 || len(item.Detail) > 16<<10 {
 			return fmt.Errorf("%w: invalid probe evidence", ErrInvalidReport)
+		}
+		if item.Status == probe.StatusNotAttempted {
+			if item.Attempts != 0 || !item.StartedAt.IsZero() || !item.FinishedAt.IsZero() || item.Duration != 0 || item.Observed != "" || item.Detail != "" || item.Truncated || item.StdoutTruncated || item.StderrTruncated || item.TrustedHostCommand || item.ExhaustedBy != "" {
+				return fmt.Errorf("%w: invalid unattempted probe evidence", ErrInvalidReport)
+			}
+		} else if item.Attempts < 1 || item.StartedAt.IsZero() || item.FinishedAt.Before(item.StartedAt) || item.Duration != item.FinishedAt.Sub(item.StartedAt) {
+			return fmt.Errorf("%w: invalid executed probe evidence", ErrInvalidReport)
 		}
 		if item.Required && item.Status != probe.StatusPassed && report.Outcome == drill.OutcomeSucceeded {
 			return fmt.Errorf("%w: successful outcome contains a required probe failure", ErrInvalidReport)
@@ -85,8 +97,20 @@ func (report Report) Validate() error {
 	return nil
 }
 
+func (report Report) validateIdentities() error {
+	if !utf8.ValidString(report.RunID) || strings.TrimSpace(report.RunID) == "" ||
+		!utf8.ValidString(report.PlanID) || strings.TrimSpace(report.PlanID) == "" ||
+		!utf8.ValidString(report.RecoveryPoint.ID) || strings.TrimSpace(report.RecoveryPoint.ID) == "" {
+		return fmt.Errorf("%w: %w", ErrInvalidReport, drill.ErrInvalidIdentity)
+	}
+	return nil
+}
+
 // CanonicalJSON returns stable bytes in semantic stage/probe ordinal order.
 func (report Report) CanonicalJSON(redactor redact.Redactor) ([]byte, error) {
+	if err := report.validateIdentities(); err != nil {
+		return nil, err
+	}
 	report.RecoveryPoint.SelectedAt = report.RecoveryPoint.SelectedAt.UTC()
 	report.RecoveryPoint.ID = redactor.String(report.RecoveryPoint.ID)
 	report.Stages = sortedStages(report.Stages)
@@ -104,7 +128,14 @@ func (report Report) CanonicalJSON(redactor redact.Redactor) ([]byte, error) {
 	if err := report.Validate(); err != nil {
 		return nil, err
 	}
-	return json.Marshal(report)
+	encoded, err := json.Marshal(report)
+	if err != nil {
+		return nil, err
+	}
+	if len(encoded) > maxReportBytes {
+		return nil, ErrInvalidReport
+	}
+	return encoded, nil
 }
 
 func validOutcome(outcome drill.Outcome) bool {
@@ -159,7 +190,7 @@ func validProbeKind(kind probe.Kind) bool {
 
 func validProbeStatus(status probe.Status) bool {
 	switch status {
-	case probe.StatusPassed, probe.StatusFailed, probe.StatusTimedOut, probe.StatusCancelled:
+	case probe.StatusPassed, probe.StatusFailed, probe.StatusTimedOut, probe.StatusCancelled, probe.StatusNotAttempted:
 		return true
 	default:
 		return false

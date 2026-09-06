@@ -7,7 +7,8 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
-	"regexp"
+	"strings"
+	"unicode/utf8"
 
 	"github.com/azizu06/rehearse/internal/evidence"
 	"github.com/azizu06/rehearse/internal/redact"
@@ -43,7 +44,7 @@ func NewHandler(options Options) http.Handler {
 	})
 	mux.HandleFunc("GET /api/v1/runs/{runID}/report", func(response http.ResponseWriter, request *http.Request) {
 		runID := request.PathValue("runID")
-		if !runIDPattern.MatchString(runID) || options.ReportReader == nil {
+		if strings.TrimSpace(runID) == "" || !utf8.ValidString(runID) || options.ReportReader == nil {
 			writeJSON(response, http.StatusNotFound, map[string]string{"error": "not found"})
 			return
 		}
@@ -73,8 +74,6 @@ func NewHandler(options Options) http.Handler {
 
 	return mux
 }
-
-var runIDPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$`)
 
 func writeJSON(response http.ResponseWriter, status int, payload any) {
 	response.Header().Set("Cache-Control", "no-store")

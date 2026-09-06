@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/azizu06/rehearse/internal/drill"
 	"github.com/azizu06/rehearse/internal/probe"
@@ -173,6 +174,9 @@ func (store *Store) Plan(ctx context.Context, id string, version int64) (drill.P
 	}
 	if err != nil {
 		return drill.Plan{}, fmt.Errorf("read plan: %w", err)
+	}
+	if !utf8.ValidString(plan.ID) || strings.TrimSpace(plan.ID) == "" {
+		return drill.Plan{}, fmt.Errorf("read plan identity: %w", drill.ErrInvalidIdentity)
 	}
 	if err := json.Unmarshal([]byte(references), &plan.Spec.CredentialReferences); err != nil {
 		return drill.Plan{}, fmt.Errorf("decode credential references: %w", err)
@@ -445,6 +449,9 @@ func scanRun(scanner rowScanner) (drill.Run, error) {
 	}
 	if err != nil {
 		return drill.Run{}, fmt.Errorf("scan run: %w", err)
+	}
+	if !utf8.ValidString(run.ID) || strings.TrimSpace(run.ID) == "" || !utf8.ValidString(run.PlanID) || strings.TrimSpace(run.PlanID) == "" {
+		return drill.Run{}, fmt.Errorf("read run identity: %w", drill.ErrInvalidIdentity)
 	}
 	if run.CreatedAt, err = parseTime(createdAt); err != nil {
 		return drill.Run{}, fmt.Errorf("parse run created time: %w", err)

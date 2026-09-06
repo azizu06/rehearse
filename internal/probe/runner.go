@@ -129,19 +129,46 @@ func (runner *Runner) Run(ctx context.Context, config Config) Result {
 	}
 	ordered := append([]Spec(nil), config.Probes...)
 	sort.Slice(ordered, func(left, right int) bool { return ordered[left].Ordinal < ordered[right].Ordinal })
-	for _, spec := range ordered {
+	for index, spec := range ordered {
+		if ctx.Err() != nil {
+			appendNotAttempted(&result, ordered[index:])
+			break
+		}
 		evidence := runner.run(ctx, spec)
+		if evidence.Attempts == 0 && ctx.Err() != nil {
+			evidence = notAttemptedEvidence(spec)
+		}
 		result.Probes = append(result.Probes, evidence)
 		if spec.Required && evidence.Status != StatusPassed {
 			result.RequiredPassed = false
 		}
 		if ctx.Err() != nil {
+			appendNotAttempted(&result, ordered[index+1:])
 			break
 		}
 	}
 	result.FinishedAt = runner.clock.Now().UTC()
 	result.Duration = result.FinishedAt.Sub(startedAt)
 	return result
+}
+
+func appendNotAttempted(result *Result, specs []Spec) {
+	for _, spec := range specs {
+		result.Probes = append(result.Probes, notAttemptedEvidence(spec))
+		if spec.Required {
+			result.RequiredPassed = false
+		}
+	}
+}
+
+func notAttemptedEvidence(spec Spec) Evidence {
+	return Evidence{
+		Ordinal:  spec.Ordinal,
+		ID:       spec.ID,
+		Kind:     spec.Kind,
+		Required: spec.Required,
+		Status:   StatusNotAttempted,
+	}
 }
 
 func (runner *Runner) run(parent context.Context, spec Spec) Evidence {
@@ -386,7 +413,7 @@ func (runner *Runner) runAttempts(parent context.Context, spec Spec, attempt fun
 		observed, err := attempt(ctx)
 		if err == nil {
 			if ctx.Err() != nil {
-				if parent.Err() == nil && errors.Is(ctx.Err(), context.DeadlineExceeded) {
+				if errors.Is(parent.Err(), context.DeadlineExceeded) || (parent.Err() == nil && errors.Is(ctx.Err(), context.DeadlineExceeded)) {
 					evidence.ExhaustedBy = ExhaustedDeadline
 				}
 				break
@@ -423,6 +450,9 @@ func (runner *Runner) runAttempts(parent context.Context, spec Spec, attempt fun
 
 	if evidence.Status == "" {
 		switch {
+		case errors.Is(parent.Err(), context.DeadlineExceeded):
+			evidence.Status = StatusTimedOut
+			evidence.ExhaustedBy = ExhaustedDeadline
 		case parent.Err() != nil:
 			evidence.Status = StatusCancelled
 		case evidence.ExhaustedBy == ExhaustedDeadline || !runner.clock.Now().Before(deadline) || ctx.Err() == context.DeadlineExceeded:

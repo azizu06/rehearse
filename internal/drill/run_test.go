@@ -62,6 +62,32 @@ func TestRunAcceptsOnlyTheDeterministicStageOrder(t *testing.T) {
 	}
 }
 
+func TestNewRunRejectsInvalidUTF8Identity(t *testing.T) {
+	t.Parallel()
+
+	now := time.Date(2026, time.July, 15, 16, 0, 0, 0, time.UTC)
+	tests := []struct {
+		name   string
+		runID  string
+		planID string
+	}{
+		{name: "run ID", runID: string([]byte{0xff}), planID: "plan-1"},
+		{name: "plan ID", runID: "run-1", planID: string([]byte{0xff})},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			_, _, err := drill.NewRun(test.runID, test.planID, 1, now)
+			if !errors.Is(err, drill.ErrInvalidRun) {
+				t.Fatalf("NewRun() error = %v, want ErrInvalidRun", err)
+			}
+			if !errors.Is(err, drill.ErrInvalidIdentity) {
+				t.Fatalf("NewRun() error = %v, want ErrInvalidIdentity", err)
+			}
+		})
+	}
+}
+
 func TestRunOutcomesAndCleanupRemainOrthogonal(t *testing.T) {
 	t.Parallel()
 

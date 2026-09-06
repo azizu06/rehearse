@@ -63,10 +63,12 @@ func TestPlanRejectsInvalidPersistedFields(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
-		name   string
-		mutate func(*drill.Plan)
+		name         string
+		mutate       func(*drill.Plan)
+		wantIdentity bool
 	}{
 		{name: "missing id", mutate: func(plan *drill.Plan) { plan.ID = "" }},
+		{name: "invalid UTF-8 id", mutate: func(plan *drill.Plan) { plan.ID = string([]byte{0xff}) }, wantIdentity: true},
 		{name: "missing name", mutate: func(plan *drill.Plan) { plan.Name = " " }},
 		{name: "nonpositive version", mutate: func(plan *drill.Plan) { plan.Version = 0 }},
 		{name: "missing creation time", mutate: func(plan *drill.Plan) { plan.CreatedAt = time.Time{} }},
@@ -80,8 +82,12 @@ func TestPlanRejectsInvalidPersistedFields(t *testing.T) {
 
 			plan := validPlan()
 			test.mutate(&plan)
-			if err := plan.Validate(); !errors.Is(err, drill.ErrInvalidPlan) {
+			err := plan.Validate()
+			if !errors.Is(err, drill.ErrInvalidPlan) {
 				t.Fatalf("Validate error = %v, want ErrInvalidPlan", err)
+			}
+			if test.wantIdentity && !errors.Is(err, drill.ErrInvalidIdentity) {
+				t.Fatalf("Validate error = %v, want ErrInvalidIdentity", err)
 			}
 		})
 	}

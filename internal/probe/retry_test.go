@@ -82,6 +82,50 @@ func TestRunRejectsAttemptSuccessAfterCancellation(t *testing.T) {
 	}
 }
 
+func TestRunRecordsUnattemptedProbesAfterCancellation(t *testing.T) {
+	t.Parallel()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	client := &http.Client{Transport: cancellingSuccessfulTransport{cancel: cancel}}
+	configuration, err := probe.ParseConfig(strings.NewReader(`{
+  "schema_version":"rehearse.probes/v1",
+  "probes":[
+    {
+      "ordinal":1,"id":"cancelled-optional","kind":"http","required":false,
+      "retry":{"deadline":"1s","backoff":"10ms","max_attempts":1},
+      "http":{"url":"http://127.0.0.1/cancel","expected_status":204}
+    },
+    {
+      "ordinal":2,"id":"required-never-started","kind":"http","required":true,
+      "retry":{"deadline":"1s","backoff":"10ms","max_attempts":1},
+      "http":{"url":"http://127.0.0.1/unattempted","expected_status":204}
+    }
+  ]
+}`))
+	if err != nil {
+		t.Fatalf("ParseConfig() error = %v", err)
+	}
+
+	result := probe.NewRunner(probe.Options{HTTPClient: client}).Run(ctx, configuration)
+
+	if result.RequiredPassed {
+		t.Error("Runner.Run() required passed = true, want false with an unattempted required probe")
+	}
+	if got := len(result.Probes); got != 2 {
+		t.Fatalf("Runner.Run() probe count = %d, want 2", got)
+	}
+	unattempted := result.Probes[1]
+	if unattempted.Ordinal != 2 || unattempted.ID != "required-never-started" || !unattempted.Required {
+		t.Errorf("Runner.Run() unattempted declaration = %#v, want ordinal 2 required-never-started required", unattempted)
+	}
+	if unattempted.Status != probe.StatusNotAttempted || unattempted.Attempts != 0 {
+		t.Errorf("Runner.Run() unattempted status = %q with %d attempts, want %q with 0", unattempted.Status, unattempted.Attempts, probe.StatusNotAttempted)
+	}
+	if !unattempted.StartedAt.IsZero() || !unattempted.FinishedAt.IsZero() || unattempted.Duration != 0 {
+		t.Errorf("Runner.Run() unattempted timing = %s to %s for %s, want zero values", unattempted.StartedAt, unattempted.FinishedAt, unattempted.Duration)
+	}
+}
+
 func TestRunRejectsAttemptSuccessAfterProbeDeadline(t *testing.T) {
 	t.Parallel()
 

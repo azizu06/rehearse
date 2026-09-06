@@ -6,7 +6,9 @@ import (
 	"errors"
 	"fmt"
 	"sort"
+	"time"
 
+	"github.com/azizu06/rehearse/internal/drill"
 	"github.com/azizu06/rehearse/internal/evidence"
 	"github.com/azizu06/rehearse/internal/probe"
 	"github.com/azizu06/rehearse/internal/redact"
@@ -30,6 +32,13 @@ func (store *Store) SaveReport(ctx context.Context, report evidence.Report, reda
 	if !run.Terminal() || run.PlanID != sanitized.PlanID || run.PlanVersion != sanitized.PlanVersion || run.Outcome != sanitized.Outcome || run.Cleanup != sanitized.Cleanup {
 		return fmt.Errorf("%w: report disagrees with terminal run", evidence.ErrInvalidReport)
 	}
+	events, err := store.Events(ctx, run.ID)
+	if err != nil {
+		return err
+	}
+	if err := validateReportHistory(events, sanitized); err != nil {
+		return err
+	}
 	plan, err := store.Plan(ctx, run.PlanID, run.PlanVersion)
 	if err != nil {
 		return err
@@ -42,6 +51,59 @@ func (store *Store) SaveReport(ctx context.Context, report evidence.Report, reda
 		VALUES (?, ?, ?, ?)
 	`, sanitized.RunID, sanitized.SchemaVersion, string(encoded), formatTime(run.UpdatedAt)); err != nil {
 		return fmt.Errorf("insert run report: %w", err)
+	}
+	return nil
+}
+
+type stageBounds struct {
+	startedAt  time.Time
+	finishedAt time.Time
+}
+
+func validateReportHistory(events []drill.Event, report evidence.Report) error {
+	bounds := make(map[drill.Stage]stageBounds)
+	var active drill.Stage
+	for _, event := range events {
+		switch event.Kind {
+		case drill.EventRunCreated:
+			active = drill.StageQueued
+			bounds[active] = stageBounds{startedAt: event.OccurredAt}
+		case drill.EventStageStarted:
+			if active != "" {
+				current := bounds[active]
+				current.finishedAt = event.OccurredAt
+				bounds[active] = current
+			}
+			active = event.Stage
+			bounds[active] = stageBounds{startedAt: event.OccurredAt}
+		case drill.EventRunSucceeded, drill.EventRunFailed, drill.EventRunCancelled, drill.EventRunTimedOut:
+			if active != "" {
+				current := bounds[active]
+				current.finishedAt = event.OccurredAt
+				bounds[active] = current
+			}
+			active = drill.StageCleanup
+			bounds[active] = stageBounds{startedAt: event.OccurredAt}
+		case drill.EventCleanupSucceeded, drill.EventCleanupFailed:
+			current := bounds[drill.StageCleanup]
+			current.finishedAt = event.OccurredAt
+			bounds[drill.StageCleanup] = current
+		}
+	}
+	for _, stage := range report.Stages {
+		known, ok := bounds[stage.Name]
+		if !ok || known.finishedAt.IsZero() || !stage.StartedAt.Equal(known.startedAt) || !stage.FinishedAt.Equal(known.finishedAt) {
+			return fmt.Errorf("%w: report stage contradicts run history", evidence.ErrInvalidReport)
+		}
+	}
+	probeStage, reachedProbe := bounds[drill.StageProbe]
+	for _, item := range report.Probes {
+		if item.Status == probe.StatusNotAttempted {
+			continue
+		}
+		if !reachedProbe || probeStage.finishedAt.IsZero() || item.StartedAt.Before(probeStage.startedAt) || item.FinishedAt.After(probeStage.finishedAt) {
+			return fmt.Errorf("%w: attempted probe contradicts run history", evidence.ErrInvalidReport)
+		}
 	}
 	return nil
 }
@@ -61,6 +123,10 @@ func validateProbeEvidence(config probe.Config, items []probe.Evidence) error {
 		case probe.StatusPassed, probe.StatusCancelled:
 			if item.ExhaustedBy != "" {
 				return fmt.Errorf("%w: report probe exhaustion disagrees with status", evidence.ErrInvalidReport)
+			}
+		case probe.StatusNotAttempted:
+			if item.Attempts != 0 || item.ExhaustedBy != "" {
+				return fmt.Errorf("%w: report probe execution disagrees with status", evidence.ErrInvalidReport)
 			}
 		case probe.StatusFailed:
 			if item.ExhaustedBy != probe.ExhaustedAttempts || item.Attempts != spec.Retry.MaxAttempts {

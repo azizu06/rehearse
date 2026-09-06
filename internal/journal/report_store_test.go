@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -32,6 +33,8 @@ func TestCommandBoundaryEvidenceRemainsRedactedThroughRestartAndAPI(t *testing.T
 	secret := "issue-10-persisted-secret"
 	boundaryMarker := commandReportBoundaryMarker()
 	redactor := redact.New(secret, boundaryMarker)
+	planID := "Plan.ID_雪 with space " + strings.Repeat("p", 128)
+	runID := "Run/ID_雪 with space/" + strings.Repeat("r", 128)
 	directory := t.TempDir()
 	path := filepath.Join(directory, "rehearse.db")
 	store, err := journal.Open(ctx, path)
@@ -40,7 +43,7 @@ func TestCommandBoundaryEvidenceRemainsRedactedThroughRestartAndAPI(t *testing.T
 	}
 	startedAt := time.Date(2026, time.July, 15, 20, 0, 0, 0, time.UTC)
 	plan := drill.Plan{
-		ID: "plan-10", Name: "probe evidence", Version: 1, CreatedAt: startedAt,
+		ID: planID, Name: "probe evidence", Version: 1, CreatedAt: startedAt,
 		Spec: drill.PlanSpec{
 			SourceKind: "backup-source", TargetKind: "restore-target",
 			ProbeConfig: probe.Config{SchemaVersion: probe.SchemaVersion, Probes: []probe.Spec{
@@ -60,7 +63,7 @@ func TestCommandBoundaryEvidenceRemainsRedactedThroughRestartAndAPI(t *testing.T
 	if err := store.CreatePlan(ctx, plan); err != nil {
 		t.Fatalf("CreatePlan: %v", err)
 	}
-	run, err := store.CreateRun(ctx, "run-10", plan.ID, plan.Version, startedAt)
+	run, err := store.CreateRun(ctx, runID, plan.ID, plan.Version, startedAt)
 	if err != nil {
 		t.Fatalf("CreateRun: %v", err)
 	}
@@ -83,6 +86,9 @@ func TestCommandBoundaryEvidenceRemainsRedactedThroughRestartAndAPI(t *testing.T
 	if !probeResult.RequiredPassed {
 		t.Fatalf("Runner.Run() required passed = false, probes = %#v", probeResult.Probes)
 	}
+	probeResult.Probes[0].StartedAt = startedAt.Add(5 * time.Second)
+	probeResult.Probes[0].FinishedAt = startedAt.Add(6 * time.Second)
+	probeResult.Probes[0].Duration = time.Second
 	report := evidence.Report{
 		SchemaVersion: evidence.SchemaVersion,
 		RunID:         run.ID, PlanID: plan.ID, PlanVersion: plan.Version,
@@ -141,7 +147,7 @@ func TestCommandBoundaryEvidenceRemainsRedactedThroughRestartAndAPI(t *testing.T
 	}
 	assertBoundedCommandEvidence(t, loadedReport.Probes[0].Observed, boundaryMarker)
 	handler := controlplane.NewHandler(controlplane.Options{ReportReader: reopened, Redactor: redactor})
-	request := httptest.NewRequest(http.MethodGet, "/api/v1/runs/run-10/report", nil)
+	request := httptest.NewRequest(http.MethodGet, "/api/v1/runs/"+url.PathEscape(run.ID)+"/report", nil)
 	response := httptest.NewRecorder()
 	handler.ServeHTTP(response, request)
 	if response.Code != http.StatusOK {
@@ -159,6 +165,203 @@ func TestCommandBoundaryEvidenceRemainsRedactedThroughRestartAndAPI(t *testing.T
 	if bytes.Contains(encoded, []byte(secret)) || !bytes.Contains(encoded, []byte(redact.Replacement)) {
 		t.Fatalf("loaded report redaction = %s", encoded)
 	}
+}
+
+func TestTerminalReportsPersistUnattemptedProbeEvidence(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	startedAt := time.Date(2026, time.September, 6, 2, 0, 0, 0, time.UTC)
+	store, err := journal.Open(ctx, filepath.Join(t.TempDir(), "rehearse.db"))
+	if err != nil {
+		t.Fatalf("Open() error = %v", err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	plan := drill.Plan{
+		ID: "terminal-plan", Name: "terminal reports", Version: 1, CreatedAt: startedAt,
+		Spec: drill.PlanSpec{
+			SourceKind: "backup-source", TargetKind: "restore-target",
+			ProbeConfig: probe.Config{SchemaVersion: probe.SchemaVersion, Probes: []probe.Spec{
+				{Ordinal: 1, ID: "executed-probe", Kind: probe.KindHTTP, Required: true, Retry: probe.RetryPolicy{Deadline: time.Second, Backoff: 10 * time.Millisecond, MaxAttempts: 1}, HTTP: &probe.HTTPSpec{URL: "http://127.0.0.1/executed", ExpectedStatus: http.StatusNoContent}},
+				{Ordinal: 2, ID: "unattempted-probe", Kind: probe.KindHTTP, Required: false, Retry: probe.RetryPolicy{Deadline: time.Second, Backoff: 10 * time.Millisecond, MaxAttempts: 1}, HTTP: &probe.HTTPSpec{URL: "http://127.0.0.1/unattempted", ExpectedStatus: http.StatusNoContent}},
+			}},
+		},
+	}
+	if err := store.CreatePlan(ctx, plan); err != nil {
+		t.Fatalf("CreatePlan() error = %v", err)
+	}
+	tests := []struct {
+		name         string
+		outcome      drill.Outcome
+		status       probe.Status
+		exhausted    probe.ExhaustedBy
+		beforeProbes bool
+	}{
+		{name: "failed-before-probes", outcome: drill.OutcomeFailed, beforeProbes: true},
+		{name: "cancelled", outcome: drill.OutcomeCancelled, status: probe.StatusCancelled},
+		{name: "timed-out", outcome: drill.OutcomeTimedOut, status: probe.StatusTimedOut, exhausted: probe.ExhaustedDeadline},
+	}
+	for index, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			offset := time.Duration(index) * time.Minute
+			run, err := store.CreateRun(ctx, "terminal-run-"+test.name, plan.ID, plan.Version, startedAt.Add(offset))
+			if err != nil {
+				t.Fatalf("CreateRun() error = %v", err)
+			}
+			outcomeAt := startedAt.Add(offset + time.Second)
+			stageEvidence := evidence.Stage{Ordinal: 1, Name: drill.StageQueued, StartedAt: startedAt.Add(offset), FinishedAt: outcomeAt, Duration: time.Second}
+			probeEvidence := []probe.Evidence{
+				{Ordinal: 1, ID: "executed-probe", Kind: probe.KindHTTP, Required: true, Status: probe.StatusNotAttempted},
+				{Ordinal: 2, ID: "unattempted-probe", Kind: probe.KindHTTP, Required: false, Status: probe.StatusNotAttempted},
+			}
+			if !test.beforeProbes {
+				for stageIndex, stage := range []drill.Stage{drill.StagePreflight, drill.StageAcquire, drill.StageRestore, drill.StageBoot, drill.StageProbe} {
+					run, err = store.Transition(ctx, run.ID, stage, startedAt.Add(offset+time.Duration(stageIndex+1)*time.Second))
+					if err != nil {
+						t.Fatalf("Transition(%s) error = %v", stage, err)
+					}
+				}
+				outcomeAt = startedAt.Add(offset + 6*time.Second)
+				stageEvidence = evidence.Stage{Ordinal: 1, Name: drill.StageProbe, StartedAt: startedAt.Add(offset + 5*time.Second), FinishedAt: outcomeAt, Duration: time.Second}
+				probeEvidence[0] = probe.Evidence{Ordinal: 1, ID: "executed-probe", Kind: probe.KindHTTP, Required: true, Status: test.status, Attempts: 1, StartedAt: startedAt.Add(offset + 5*time.Second), FinishedAt: outcomeAt, Duration: time.Second, ExhaustedBy: test.exhausted}
+			}
+			run, err = store.RecordOutcome(ctx, run.ID, test.outcome, outcomeAt)
+			if err != nil {
+				t.Fatalf("RecordOutcome(%s) error = %v", test.outcome, err)
+			}
+			run, err = store.RecordCleanup(ctx, run.ID, drill.CleanupSucceeded, outcomeAt.Add(time.Second))
+			if err != nil {
+				t.Fatalf("RecordCleanup() error = %v", err)
+			}
+			report := evidence.Report{
+				SchemaVersion: evidence.SchemaVersion,
+				RunID:         run.ID, PlanID: plan.ID, PlanVersion: plan.Version,
+				RecoveryPoint: evidence.RecoveryPoint{ID: "snapshot-terminal", SelectedAt: startedAt.Add(offset)},
+				Stages:        []evidence.Stage{stageEvidence},
+				Probes:        probeEvidence,
+				Outcome:       run.Outcome, Cleanup: run.Cleanup,
+			}
+			if test.beforeProbes {
+				forged := report
+				forged.Probes = append([]probe.Evidence(nil), report.Probes...)
+				forged.Probes[0] = probe.Evidence{Ordinal: 1, ID: "executed-probe", Kind: probe.KindHTTP, Required: true, Status: probe.StatusPassed, Attempts: 1, StartedAt: stageEvidence.StartedAt, FinishedAt: stageEvidence.FinishedAt, Duration: stageEvidence.Duration}
+				if err := store.SaveReport(ctx, forged, redact.Redactor{}); !errors.Is(err, evidence.ErrInvalidReport) {
+					t.Fatalf("SaveReport() forged queued attempt error = %v, want ErrInvalidReport", err)
+				}
+			}
+			contradictory := report
+			contradictory.Stages = append([]evidence.Stage(nil), report.Stages...)
+			contradictory.Stages[0].StartedAt = contradictory.Stages[0].StartedAt.Add(time.Millisecond)
+			contradictory.Stages[0].FinishedAt = contradictory.Stages[0].FinishedAt.Add(time.Millisecond)
+			if err := store.SaveReport(ctx, contradictory, redact.Redactor{}); !errors.Is(err, evidence.ErrInvalidReport) {
+				t.Fatalf("SaveReport() contradictory stage error = %v, want ErrInvalidReport", err)
+			}
+			if !test.beforeProbes {
+				omitted := report
+				omitted.Probes = report.Probes[1:]
+				if err := store.SaveReport(ctx, omitted, redact.Redactor{}); !errors.Is(err, evidence.ErrInvalidReport) {
+					t.Fatalf("SaveReport() omitted executed probe error = %v, want ErrInvalidReport", err)
+				}
+			}
+			if err := store.SaveReport(ctx, report, redact.Redactor{}); err != nil {
+				t.Fatalf("SaveReport() error = %v", err)
+			}
+			loaded, err := store.Report(ctx, run.ID)
+			if err != nil {
+				t.Fatalf("Report() error = %v", err)
+			}
+			firstUnattempted := 1
+			if test.beforeProbes {
+				firstUnattempted = 0
+			}
+			for _, unattempted := range loaded.Probes[firstUnattempted:] {
+				if unattempted.Status != probe.StatusNotAttempted || unattempted.Attempts != 0 || !unattempted.StartedAt.IsZero() || !unattempted.FinishedAt.IsZero() || unattempted.Duration != 0 {
+					t.Errorf("Report() unattempted evidence = %#v, want status not_attempted with zero attempts and timing", unattempted)
+				}
+			}
+		})
+	}
+}
+
+func TestParentDeadlineRunnerEvidencePersistsAsTimedOut(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	startedAt := time.Now().UTC()
+	store, err := journal.Open(ctx, filepath.Join(t.TempDir(), "rehearse.db"))
+	if err != nil {
+		t.Fatalf("Open() error = %v", err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	configuration := probe.Config{SchemaVersion: probe.SchemaVersion, Probes: []probe.Spec{
+		{Ordinal: 1, ID: "parent-deadline", Kind: probe.KindHTTP, Required: true, Retry: probe.RetryPolicy{Deadline: time.Second, Backoff: 10 * time.Millisecond, MaxAttempts: 1}, HTTP: &probe.HTTPSpec{URL: "http://127.0.0.1/deadline", ExpectedStatus: http.StatusNoContent}},
+	}}
+	plan := drill.Plan{
+		ID: "parent-deadline-plan", Name: "parent deadline", Version: 1, CreatedAt: startedAt,
+		Spec: drill.PlanSpec{SourceKind: "backup-source", TargetKind: "restore-target", ProbeConfig: configuration},
+	}
+	if err := store.CreatePlan(ctx, plan); err != nil {
+		t.Fatalf("CreatePlan() error = %v", err)
+	}
+	run, err := store.CreateRun(ctx, "parent-deadline-run", plan.ID, plan.Version, startedAt)
+	if err != nil {
+		t.Fatalf("CreateRun() error = %v", err)
+	}
+	probeStageAt := time.Now().UTC()
+	for _, stage := range []drill.Stage{drill.StagePreflight, drill.StageAcquire, drill.StageRestore, drill.StageBoot, drill.StageProbe} {
+		run, err = store.Transition(ctx, run.ID, stage, probeStageAt)
+		if err != nil {
+			t.Fatalf("Transition(%s) error = %v", stage, err)
+		}
+	}
+	parent, cancel := context.WithTimeout(ctx, 10*time.Millisecond)
+	defer cancel()
+	result := probe.NewRunner(probe.Options{HTTPClient: &http.Client{Transport: successfulJournalResponseAfterContextDoneTransport{}}}).Run(parent, configuration)
+	if got := result.Probes[0].Status; got != probe.StatusTimedOut {
+		t.Fatalf("Runner.Run() parent deadline status = %q, want %q", got, probe.StatusTimedOut)
+	}
+	if got := result.Probes[0].ExhaustedBy; got != probe.ExhaustedDeadline {
+		t.Fatalf("Runner.Run() parent deadline exhausted by = %q, want %q", got, probe.ExhaustedDeadline)
+	}
+	outcomeAt := time.Now().UTC()
+	run, err = store.RecordOutcome(ctx, run.ID, drill.OutcomeTimedOut, outcomeAt)
+	if err != nil {
+		t.Fatalf("RecordOutcome() error = %v", err)
+	}
+	run, err = store.RecordCleanup(ctx, run.ID, drill.CleanupSucceeded, outcomeAt)
+	if err != nil {
+		t.Fatalf("RecordCleanup() error = %v", err)
+	}
+	report := evidence.Report{
+		SchemaVersion: evidence.SchemaVersion,
+		RunID:         run.ID, PlanID: plan.ID, PlanVersion: plan.Version,
+		RecoveryPoint: evidence.RecoveryPoint{ID: "snapshot-parent-deadline", SelectedAt: startedAt},
+		Stages:        []evidence.Stage{{Ordinal: 1, Name: drill.StageProbe, StartedAt: probeStageAt, FinishedAt: outcomeAt, Duration: outcomeAt.Sub(probeStageAt)}},
+		Probes:        result.Probes,
+		Outcome:       run.Outcome, Cleanup: run.Cleanup,
+	}
+	if err := store.SaveReport(ctx, report, redact.Redactor{}); err != nil {
+		t.Fatalf("SaveReport() error = %v", err)
+	}
+	loaded, err := store.Report(ctx, run.ID)
+	if err != nil {
+		t.Fatalf("Report() error = %v", err)
+	}
+	if loaded.Probes[0].Status != probe.StatusTimedOut || loaded.Probes[0].ExhaustedBy != probe.ExhaustedDeadline {
+		t.Fatalf("Report() parent deadline evidence = %#v, want timed_out by deadline", loaded.Probes[0])
+	}
+}
+
+type successfulJournalResponseAfterContextDoneTransport struct{}
+
+func (successfulJournalResponseAfterContextDoneTransport) RoundTrip(request *http.Request) (*http.Response, error) {
+	<-request.Context().Done()
+	return &http.Response{
+		StatusCode: http.StatusNoContent,
+		Header:     make(http.Header),
+		Body:       http.NoBody,
+		Request:    request,
+	}, nil
 }
 
 func commandReportBoundaryMarker() string {
