@@ -19,8 +19,9 @@ import (
 )
 
 const (
-	SchemaVersion  = "rehearse.report/v1"
-	maxReportBytes = 20 << 20
+	SchemaVersion      = "rehearse.report/v1"
+	maxReportBytes     = 20 << 20
+	maxReportViewBytes = maxReportBytes + (1 << 10)
 )
 
 var ErrInvalidReport = errors.New("invalid evidence report")
@@ -44,15 +45,17 @@ type Stage struct {
 
 // Report is one immutable execution and cleanup truth document.
 type Report struct {
-	SchemaVersion string              `json:"schema_version"`
-	RunID         string              `json:"run_id"`
-	PlanID        string              `json:"plan_id"`
-	PlanVersion   int64               `json:"plan_version"`
-	RecoveryPoint RecoveryPoint       `json:"recovery_point"`
-	Stages        []Stage             `json:"stages"`
-	Probes        []probe.Evidence    `json:"probes"`
-	Outcome       drill.Outcome       `json:"outcome"`
-	Cleanup       drill.CleanupStatus `json:"cleanup"`
+	SchemaVersion    string              `json:"schema_version"`
+	SnapshotSequence int64               `json:"snapshot_sequence,omitempty"`
+	SnapshotAt       time.Time           `json:"snapshot_at,omitzero"`
+	RunID            string              `json:"run_id"`
+	PlanID           string              `json:"plan_id"`
+	PlanVersion      int64               `json:"plan_version"`
+	RecoveryPoint    RecoveryPoint       `json:"recovery_point"`
+	Stages           []Stage             `json:"stages"`
+	Probes           []probe.Evidence    `json:"probes"`
+	Outcome          drill.Outcome       `json:"outcome"`
+	Cleanup          drill.CleanupStatus `json:"cleanup"`
 }
 
 func (report Report) Validate() error {
@@ -60,6 +63,9 @@ func (report Report) Validate() error {
 		return err
 	}
 	if report.SchemaVersion != SchemaVersion || strings.TrimSpace(report.RunID) == "" || len(report.RunID) > maxReportBytes || strings.TrimSpace(report.PlanID) == "" || len(report.PlanID) > maxReportBytes || report.PlanVersion < 1 || report.RecoveryPoint.ID == "" || len(report.RecoveryPoint.ID) > 512 || report.RecoveryPoint.SelectedAt.IsZero() {
+		return ErrInvalidReport
+	}
+	if report.SnapshotSequence < 0 || (report.SnapshotSequence == 0) != report.SnapshotAt.IsZero() {
 		return ErrInvalidReport
 	}
 	if !validOutcome(report.Outcome) || (report.Cleanup != drill.CleanupSucceeded && report.Cleanup != drill.CleanupFailed) {
@@ -112,6 +118,7 @@ func (report Report) CanonicalJSON(redactor redact.Redactor) ([]byte, error) {
 		return nil, err
 	}
 	report.RecoveryPoint.SelectedAt = report.RecoveryPoint.SelectedAt.UTC()
+	report.SnapshotAt = report.SnapshotAt.UTC()
 	report.RecoveryPoint.ID = redactor.String(report.RecoveryPoint.ID)
 	report.Stages = sortedStages(report.Stages)
 	report.Probes = sortedProbes(report.Probes)
@@ -133,6 +140,47 @@ func (report Report) CanonicalJSON(redactor redact.Redactor) ([]byte, error) {
 		return nil, err
 	}
 	if len(encoded) > maxReportBytes {
+		return nil, ErrInvalidReport
+	}
+	return encoded, nil
+}
+
+type CurrentCleanup struct {
+	Status       drill.CleanupStatus `json:"status"`
+	AsOfSequence int64               `json:"as_of_sequence"`
+	AsOf         time.Time           `json:"as_of"`
+}
+
+type ReportView struct {
+	Snapshot       Report         `json:"snapshot"`
+	CurrentCleanup CurrentCleanup `json:"current_cleanup"`
+}
+
+func (view ReportView) CanonicalJSON(redactor redact.Redactor) ([]byte, error) {
+	snapshot, err := view.Snapshot.CanonicalJSON(redactor)
+	if err != nil {
+		return nil, err
+	}
+	view.Snapshot, err = ParseJSON(snapshot)
+	if err != nil {
+		return nil, err
+	}
+	view.CurrentCleanup.AsOf = view.CurrentCleanup.AsOf.UTC()
+	if view.Snapshot.SnapshotSequence < 1 || view.Snapshot.SnapshotAt.IsZero() ||
+		(view.CurrentCleanup.Status != drill.CleanupPending && view.CurrentCleanup.Status != drill.CleanupSucceeded && view.CurrentCleanup.Status != drill.CleanupFailed) ||
+		view.CurrentCleanup.AsOfSequence < view.Snapshot.SnapshotSequence ||
+		view.CurrentCleanup.AsOf.Before(view.Snapshot.SnapshotAt) {
+		return nil, ErrInvalidReport
+	}
+	if view.CurrentCleanup.AsOfSequence == view.Snapshot.SnapshotSequence &&
+		(view.CurrentCleanup.Status != view.Snapshot.Cleanup || !view.CurrentCleanup.AsOf.Equal(view.Snapshot.SnapshotAt)) {
+		return nil, ErrInvalidReport
+	}
+	encoded, err := json.Marshal(view)
+	if err != nil {
+		return nil, err
+	}
+	if len(encoded) > maxReportViewBytes {
 		return nil, ErrInvalidReport
 	}
 	return encoded, nil

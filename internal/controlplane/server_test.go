@@ -75,16 +75,25 @@ func TestReportAPIReappliesRedaction(t *testing.T) {
 	secret := "issue-10-api-secret"
 	startedAt := time.Date(2026, time.July, 15, 21, 0, 0, 0, time.UTC)
 	report := evidence.Report{
-		SchemaVersion: evidence.SchemaVersion,
-		RunID:         "run-10", PlanID: "plan-10", PlanVersion: 1,
+		SchemaVersion:    evidence.SchemaVersion,
+		SnapshotSequence: 1,
+		SnapshotAt:       startedAt.Add(time.Second),
+		RunID:            "run-10", PlanID: "plan-10", PlanVersion: 1,
 		RecoveryPoint: evidence.RecoveryPoint{ID: "snapshot-" + secret, SelectedAt: startedAt},
 		Stages:        []evidence.Stage{{Ordinal: 1, Name: drill.StageProbe, StartedAt: startedAt, FinishedAt: startedAt.Add(time.Second), Duration: time.Second}},
 		Probes:        []probe.Evidence{{Ordinal: 1, ID: "health", Kind: probe.KindHTTP, Required: true, Status: probe.StatusPassed, Attempts: 1, StartedAt: startedAt, FinishedAt: startedAt.Add(time.Second), Duration: time.Second, Observed: secret}},
 		Outcome:       drill.OutcomeSucceeded, Cleanup: drill.CleanupSucceeded,
 	}
 	handler := controlplane.NewHandler(controlplane.Options{
-		ReportReader: staticReportReader{report: report},
-		Redactor:     redact.New(secret),
+		ReportReader: staticReportReader{view: evidence.ReportView{
+			Snapshot: report,
+			CurrentCleanup: evidence.CurrentCleanup{
+				Status:       drill.CleanupSucceeded,
+				AsOfSequence: report.SnapshotSequence,
+				AsOf:         report.SnapshotAt,
+			},
+		}},
+		Redactor: redact.New(secret),
 	})
 	request := httptest.NewRequest(http.MethodGet, "/api/v1/runs/run-10/report", nil)
 	response := httptest.NewRecorder()
@@ -100,12 +109,12 @@ func TestReportAPIReappliesRedaction(t *testing.T) {
 }
 
 type staticReportReader struct {
-	report evidence.Report
-	err    error
+	view evidence.ReportView
+	err  error
 }
 
-func (reader staticReportReader) Report(context.Context, string) (evidence.Report, error) {
-	return reader.report, reader.err
+func (reader staticReportReader) ReportView(context.Context, string) (evidence.ReportView, error) {
+	return reader.view, reader.err
 }
 
 func TestDashboardIsServedOutsideTheAPINamespace(t *testing.T) {

@@ -164,13 +164,17 @@ func (store *Store) CreatePlan(ctx context.Context, plan drill.Plan) error {
 
 // Plan loads one immutable plan version.
 func (store *Store) Plan(ctx context.Context, id string, version int64) (drill.Plan, error) {
+	return loadPlan(ctx, store.database, id, version)
+}
+
+func loadPlan(ctx context.Context, queryer rowQueryer, id string, version int64) (drill.Plan, error) {
 	var (
 		plan        drill.Plan
 		references  string
 		probeConfig string
 		createdAt   string
 	)
-	err := store.database.QueryRowContext(ctx, `
+	err := queryer.QueryRowContext(ctx, `
         SELECT plans.id, plans.name, plan_versions.version,
                plan_versions.source_kind, plan_versions.target_kind,
 			   plan_versions.credential_references, plan_versions.probe_config,
@@ -496,7 +500,15 @@ func (store *Store) RunsNeedingReconciliation(ctx context.Context) ([]drill.Run,
 
 // Events returns the immutable run history in sequence order.
 func (store *Store) Events(ctx context.Context, runID string) ([]drill.Event, error) {
-	rows, err := store.database.QueryContext(ctx, `
+	return loadEvents(ctx, store.database, runID)
+}
+
+type rowsQueryer interface {
+	QueryContext(context.Context, string, ...any) (*sql.Rows, error)
+}
+
+func loadEvents(ctx context.Context, queryer rowsQueryer, runID string) ([]drill.Event, error) {
+	rows, err := queryer.QueryContext(ctx, `
         SELECT sequence, kind, stage, outcome, cleanup_status, occurred_at
         FROM run_events
         WHERE run_id = ?
@@ -685,11 +697,11 @@ type rowScanner interface {
 	Scan(dest ...any) error
 }
 
-type runQueryer interface {
+type rowQueryer interface {
 	QueryRowContext(context.Context, string, ...any) *sql.Row
 }
 
-func loadRun(ctx context.Context, queryer runQueryer, id string) (drill.Run, error) {
+func loadRun(ctx context.Context, queryer rowQueryer, id string) (drill.Run, error) {
 	return scanRun(queryer.QueryRowContext(ctx, `
         SELECT id, plan_id, plan_version, stage, outcome, cleanup_status,
                created_at, updated_at, version, needs_reconciliation,

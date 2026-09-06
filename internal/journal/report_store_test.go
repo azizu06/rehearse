@@ -3,6 +3,7 @@ package journal_test
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -153,11 +154,11 @@ func TestCommandBoundaryEvidenceRemainsRedactedThroughRestartAndAPI(t *testing.T
 	if response.Code != http.StatusOK {
 		t.Fatalf("report API status = %d, want %d: %s", response.Code, http.StatusOK, response.Body.String())
 	}
-	apiReport, err := evidence.ParseJSON(response.Body.Bytes())
-	if err != nil {
-		t.Fatalf("ParseJSON(report API) error = %v", err)
+	var apiView evidence.ReportView
+	if err := json.NewDecoder(response.Body).Decode(&apiView); err != nil {
+		t.Fatalf("decode report API error = %v", err)
 	}
-	assertBoundedCommandEvidence(t, apiReport.Probes[0].Observed, boundaryMarker)
+	assertBoundedCommandEvidence(t, apiView.Snapshot.Probes[0].Observed, boundaryMarker)
 	encoded, err := loadedReport.CanonicalJSON(redactor)
 	if err != nil {
 		t.Fatalf("CanonicalJSON: %v", err)
@@ -229,7 +230,11 @@ func TestTerminalReportsPersistUnattemptedProbeEvidence(t *testing.T) {
 			if err != nil {
 				t.Fatalf("RecordOutcome(%s) error = %v", test.outcome, err)
 			}
-			run, err = store.RecordCleanup(ctx, run.ID, drill.CleanupSucceeded, outcomeAt.Add(time.Second))
+			cleanup := drill.CleanupSucceeded
+			if test.beforeProbes {
+				cleanup = drill.CleanupFailed
+			}
+			run, err = store.RecordCleanup(ctx, run.ID, cleanup, outcomeAt.Add(time.Second))
 			if err != nil {
 				t.Fatalf("RecordCleanup() error = %v", err)
 			}
@@ -279,7 +284,155 @@ func TestTerminalReportsPersistUnattemptedProbeEvidence(t *testing.T) {
 					t.Errorf("Report() unattempted evidence = %#v, want status not_attempted with zero attempts and timing", unattempted)
 				}
 			}
+			if test.beforeProbes {
+				beforeRetry, err := loaded.CanonicalJSON(redact.Redactor{})
+				if err != nil {
+					t.Fatalf("CanonicalJSON() before retry error = %v", err)
+				}
+				run, err = store.BeginCleanupRetry(ctx, run.ID, outcomeAt.Add(2*time.Second))
+				if err != nil {
+					t.Fatalf("BeginCleanupRetry() error = %v", err)
+				}
+				pending := getReportAPIView(t, store, run.ID)
+				if pending.Snapshot["cleanup"] != string(drill.CleanupFailed) {
+					t.Errorf("report API snapshot cleanup = %v, want %q", pending.Snapshot["cleanup"], drill.CleanupFailed)
+				}
+				if pending.Snapshot["snapshot_sequence"] == nil || pending.Snapshot["snapshot_at"] == nil {
+					t.Errorf("report API snapshot provenance = %#v, want sequence and timestamp", pending.Snapshot)
+				}
+				if pending.CurrentCleanup.Status != drill.CleanupPending || pending.CurrentCleanup.AsOfSequence != run.Version || !pending.CurrentCleanup.AsOf.Equal(run.UpdatedAt) {
+					t.Errorf("report API current cleanup = %#v, want pending at run version %d", pending.CurrentCleanup, run.Version)
+				}
+				run, err = store.RecordCleanup(ctx, run.ID, drill.CleanupSucceeded, outcomeAt.Add(3*time.Second))
+				if err != nil {
+					t.Fatalf("RecordCleanup(retry) error = %v", err)
+				}
+				succeeded := getReportAPIView(t, store, run.ID)
+				if succeeded.Snapshot["cleanup"] != string(drill.CleanupFailed) || succeeded.CurrentCleanup.Status != drill.CleanupSucceeded || succeeded.CurrentCleanup.AsOfSequence != run.Version || !succeeded.CurrentCleanup.AsOf.Equal(run.UpdatedAt) {
+					t.Errorf("report API after cleanup retry = snapshot %#v current %#v", succeeded.Snapshot, succeeded.CurrentCleanup)
+				}
+				storedAfterRetry, err := store.Report(ctx, run.ID)
+				if err != nil {
+					t.Fatalf("Report() after retry error = %v", err)
+				}
+				afterRetry, err := storedAfterRetry.CanonicalJSON(redact.Redactor{})
+				if err != nil {
+					t.Fatalf("CanonicalJSON() after retry error = %v", err)
+				}
+				if !bytes.Equal(afterRetry, beforeRetry) {
+					t.Fatalf("stored report changed across cleanup retry:\nbefore: %s\nafter:  %s", beforeRetry, afterRetry)
+				}
+			}
 		})
+	}
+}
+
+type reportAPIView struct {
+	Snapshot       map[string]any `json:"snapshot"`
+	CurrentCleanup struct {
+		Status       drill.CleanupStatus `json:"status"`
+		AsOfSequence int64               `json:"as_of_sequence"`
+		AsOf         time.Time           `json:"as_of"`
+	} `json:"current_cleanup"`
+}
+
+func getReportAPIView(t *testing.T, reader controlplane.ReportReader, runID string) reportAPIView {
+	t.Helper()
+	handler := controlplane.NewHandler(controlplane.Options{ReportReader: reader})
+	request := httptest.NewRequest(http.MethodGet, "/api/v1/runs/"+url.PathEscape(runID)+"/report", nil)
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("report API status = %d, want %d: %s", response.Code, http.StatusOK, response.Body.String())
+	}
+	var view reportAPIView
+	if err := json.NewDecoder(response.Body).Decode(&view); err != nil {
+		t.Fatalf("decode report API: %v", err)
+	}
+	return view
+}
+
+func TestSaveReportAndCleanupRetryPublishOneConsistentOrder(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	startedAt := time.Date(2026, time.September, 6, 5, 0, 0, 0, time.UTC)
+	store, err := journal.Open(ctx, filepath.Join(t.TempDir(), "rehearse.db"))
+	if err != nil {
+		t.Fatalf("Open() error = %v", err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	configuration := probe.Config{SchemaVersion: probe.SchemaVersion, Probes: []probe.Spec{
+		{Ordinal: 1, ID: "never-started", Kind: probe.KindHTTP, Required: false, Retry: probe.RetryPolicy{Deadline: time.Second, Backoff: 10 * time.Millisecond, MaxAttempts: 1}, HTTP: &probe.HTTPSpec{URL: "http://127.0.0.1/unattempted", ExpectedStatus: http.StatusNoContent}},
+	}}
+	plan := drill.Plan{
+		ID: "report-order-plan", Name: "report ordering", Version: 1, CreatedAt: startedAt,
+		Spec: drill.PlanSpec{SourceKind: "backup-source", TargetKind: "restore-target", ProbeConfig: configuration},
+	}
+	if err := store.CreatePlan(ctx, plan); err != nil {
+		t.Fatalf("CreatePlan() error = %v", err)
+	}
+	for attempt := 0; attempt < 16; attempt++ {
+		runStartedAt := startedAt.Add(time.Duration(attempt) * time.Minute)
+		run, err := store.CreateRun(ctx, fmt.Sprintf("report-order-run-%d", attempt), plan.ID, plan.Version, runStartedAt)
+		if err != nil {
+			t.Fatalf("CreateRun(%d) error = %v", attempt, err)
+		}
+		run, err = store.RecordOutcome(ctx, run.ID, drill.OutcomeFailed, runStartedAt.Add(time.Second))
+		if err != nil {
+			t.Fatalf("RecordOutcome(%d) error = %v", attempt, err)
+		}
+		run, err = store.RecordCleanup(ctx, run.ID, drill.CleanupFailed, runStartedAt.Add(2*time.Second))
+		if err != nil {
+			t.Fatalf("RecordCleanup(%d) error = %v", attempt, err)
+		}
+		snapshotVersion := run.Version
+		snapshotAt := run.UpdatedAt
+		report := evidence.Report{
+			SchemaVersion: evidence.SchemaVersion,
+			RunID:         run.ID, PlanID: plan.ID, PlanVersion: plan.Version,
+			RecoveryPoint: evidence.RecoveryPoint{ID: "snapshot-ordering", SelectedAt: runStartedAt},
+			Stages:        []evidence.Stage{{Ordinal: 1, Name: drill.StageQueued, StartedAt: runStartedAt, FinishedAt: runStartedAt.Add(time.Second), Duration: time.Second}},
+			Probes:        []probe.Evidence{{Ordinal: 1, ID: "never-started", Kind: probe.KindHTTP, Required: false, Status: probe.StatusNotAttempted}},
+			Outcome:       run.Outcome, Cleanup: run.Cleanup,
+		}
+		start := make(chan struct{})
+		saveResult := make(chan error, 1)
+		retryResult := make(chan error, 1)
+		go func() {
+			<-start
+			saveResult <- store.SaveReport(ctx, report, redact.Redactor{})
+		}()
+		go func() {
+			<-start
+			_, err := store.BeginCleanupRetry(ctx, run.ID, runStartedAt.Add(3*time.Second))
+			retryResult <- err
+		}()
+		close(start)
+		saveErr := <-saveResult
+		retryErr := <-retryResult
+		if retryErr != nil {
+			t.Fatalf("BeginCleanupRetry(%d) error = %v", attempt, retryErr)
+		}
+		if saveErr != nil {
+			if !errors.Is(saveErr, evidence.ErrInvalidReport) {
+				t.Fatalf("SaveReport(%d) error = %v, want ErrInvalidReport", attempt, saveErr)
+			}
+			if _, err := store.Report(ctx, run.ID); !errors.Is(err, evidence.ErrReportNotFound) {
+				t.Fatalf("Report(%d) after rejected capture error = %v, want ErrReportNotFound", attempt, err)
+			}
+			continue
+		}
+		view, err := store.ReportView(ctx, run.ID)
+		if err != nil {
+			t.Fatalf("ReportView(%d) error = %v", attempt, err)
+		}
+		if view.Snapshot.SnapshotSequence != snapshotVersion || !view.Snapshot.SnapshotAt.Equal(snapshotAt) || view.Snapshot.Cleanup != drill.CleanupFailed {
+			t.Fatalf("ReportView(%d) snapshot = %#v, want failed cleanup at sequence %d", attempt, view.Snapshot, snapshotVersion)
+		}
+		if view.CurrentCleanup.Status != drill.CleanupPending || view.CurrentCleanup.AsOfSequence <= snapshotVersion || !view.CurrentCleanup.AsOf.After(snapshotAt) {
+			t.Fatalf("ReportView(%d) current cleanup = %#v, want later pending state", attempt, view.CurrentCleanup)
+		}
 	}
 }
 

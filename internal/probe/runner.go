@@ -418,6 +418,7 @@ func (runner *Runner) runAttempts(parent context.Context, spec Spec, attempt fun
 				}
 				break
 			}
+			evidence.Detail = ""
 			evidence.Status = StatusPassed
 			evidence.Observed, evidence.Truncated = runner.redactor.BoundedString(observed, 33<<10)
 			break

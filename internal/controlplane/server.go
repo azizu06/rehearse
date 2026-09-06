@@ -15,7 +15,7 @@ import (
 )
 
 type ReportReader interface {
-	Report(context.Context, string) (evidence.Report, error)
+	ReportView(context.Context, string) (evidence.ReportView, error)
 }
 
 // Options contains the dependencies exposed by the local control plane.
@@ -48,7 +48,7 @@ func NewHandler(options Options) http.Handler {
 			writeJSON(response, http.StatusNotFound, map[string]string{"error": "not found"})
 			return
 		}
-		report, err := options.ReportReader.Report(request.Context(), runID)
+		report, err := options.ReportReader.ReportView(request.Context(), runID)
 		if errors.Is(err, evidence.ErrReportNotFound) {
 			writeJSON(response, http.StatusNotFound, map[string]string{"error": "not found"})
 			return

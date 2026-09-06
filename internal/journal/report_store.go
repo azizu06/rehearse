@@ -15,8 +15,13 @@ import (
 )
 
 // SaveReport writes one canonical, redacted final report. Reports are immutable
-// and must agree with the terminal run projection already in the journal.
+// and capture one terminal run projection already in the journal.
 func (store *Store) SaveReport(ctx context.Context, report evidence.Report, redactor redact.Redactor) error {
+	transaction, err := store.database.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin report transaction: %w", err)
+	}
+	defer func() { _ = transaction.Rollback() }()
 	encoded, err := report.CanonicalJSON(redactor)
 	if err != nil {
 		return err
@@ -25,32 +30,45 @@ func (store *Store) SaveReport(ctx context.Context, report evidence.Report, reda
 	if err != nil {
 		return err
 	}
-	run, err := store.Run(ctx, sanitized.RunID)
+	run, err := loadRun(ctx, transaction, sanitized.RunID)
 	if err != nil {
 		return err
 	}
 	if !run.Terminal() || run.PlanID != sanitized.PlanID || run.PlanVersion != sanitized.PlanVersion || run.Outcome != sanitized.Outcome || run.Cleanup != sanitized.Cleanup {
 		return fmt.Errorf("%w: report disagrees with terminal run", evidence.ErrInvalidReport)
 	}
-	events, err := store.Events(ctx, run.ID)
+	sanitized.SnapshotSequence = run.Version
+	sanitized.SnapshotAt = run.UpdatedAt
+	encoded, err = sanitized.CanonicalJSON(redact.Redactor{})
+	if err != nil {
+		return err
+	}
+	sanitized, err = evidence.ParseJSON(encoded)
+	if err != nil {
+		return err
+	}
+	events, err := loadEvents(ctx, transaction, run.ID)
 	if err != nil {
 		return err
 	}
 	if err := validateReportHistory(events, sanitized); err != nil {
 		return err
 	}
-	plan, err := store.Plan(ctx, run.PlanID, run.PlanVersion)
+	plan, err := loadPlan(ctx, transaction, run.PlanID, run.PlanVersion)
 	if err != nil {
 		return err
 	}
 	if err := validateProbeEvidence(plan.Spec.ProbeConfig, sanitized.Probes); err != nil {
 		return err
 	}
-	if _, err := store.database.ExecContext(ctx, `
+	if _, err := transaction.ExecContext(ctx, `
 		INSERT INTO run_reports(run_id, schema_version, document, created_at)
 		VALUES (?, ?, ?, ?)
-	`, sanitized.RunID, sanitized.SchemaVersion, string(encoded), formatTime(run.UpdatedAt)); err != nil {
+	`, sanitized.RunID, sanitized.SchemaVersion, string(encoded), formatTime(sanitized.SnapshotAt)); err != nil {
 		return fmt.Errorf("insert run report: %w", err)
+	}
+	if err := transaction.Commit(); err != nil {
+		return fmt.Errorf("commit report: %w", err)
 	}
 	return nil
 }
@@ -143,11 +161,15 @@ func validateProbeEvidence(config probe.Config, items []probe.Evidence) error {
 
 // Report loads one typed immutable report.
 func (store *Store) Report(ctx context.Context, runID string) (evidence.Report, error) {
+	return loadReport(ctx, store.database, runID)
+}
+
+func loadReport(ctx context.Context, queryer rowQueryer, runID string) (evidence.Report, error) {
 	var (
 		schemaVersion string
 		document      string
 	)
-	err := store.database.QueryRowContext(ctx, `
+	err := queryer.QueryRowContext(ctx, `
 		SELECT schema_version, document FROM run_reports WHERE run_id = ?
 	`, runID).Scan(&schemaVersion, &document)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -167,4 +189,35 @@ func (store *Store) Report(ctx context.Context, runID string) (evidence.Report, 
 		return evidence.Report{}, fmt.Errorf("decode run report: %w: schema column mismatch", evidence.ErrInvalidReport)
 	}
 	return report, nil
+}
+
+func (store *Store) ReportView(ctx context.Context, runID string) (evidence.ReportView, error) {
+	transaction, err := store.database.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
+	if err != nil {
+		return evidence.ReportView{}, fmt.Errorf("begin report view transaction: %w", err)
+	}
+	defer func() { _ = transaction.Rollback() }()
+	snapshot, err := loadReport(ctx, transaction, runID)
+	if err != nil {
+		return evidence.ReportView{}, err
+	}
+	run, err := loadRun(ctx, transaction, runID)
+	if err != nil {
+		return evidence.ReportView{}, err
+	}
+	view := evidence.ReportView{
+		Snapshot: snapshot,
+		CurrentCleanup: evidence.CurrentCleanup{
+			Status:       run.Cleanup,
+			AsOfSequence: run.Version,
+			AsOf:         run.UpdatedAt,
+		},
+	}
+	if _, err := view.CanonicalJSON(redact.Redactor{}); err != nil {
+		return evidence.ReportView{}, err
+	}
+	if err := transaction.Commit(); err != nil {
+		return evidence.ReportView{}, fmt.Errorf("commit report view: %w", err)
+	}
+	return view, nil
 }

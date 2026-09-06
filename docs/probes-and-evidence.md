@@ -58,6 +58,13 @@ report UI are intentionally outside this contract. A report document is capped
 at 20 MiB, which accommodates every valid maximum probe-evidence set after JSON
 escaping.
 
+The persisted report is an immutable execution and initial-cleanup snapshot
+anchored by `snapshot_sequence` and `snapshot_at`. The report API returns that
+document under `snapshot` plus a `current_cleanup` annotation read from the same
+journal transaction. The annotation contains `status`, `as_of_sequence`, and
+`as_of`; `pending` means a cleanup retry is active, while the snapshot keeps the
+original failed or successful cleanup evidence unchanged.
+
 The real PostgreSQL verification is available through:
 
 ```bash
