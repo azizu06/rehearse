@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strings"
 	"time"
+	"unicode/utf8"
 )
 
 var (
@@ -102,6 +103,9 @@ var nextStage = map[Stage]Stage{
 func NewRun(id, planID string, planVersion int64, at time.Time) (Run, Event, error) {
 	if strings.TrimSpace(id) == "" || strings.TrimSpace(planID) == "" || planVersion < 1 || at.IsZero() {
 		return Run{}, Event{}, ErrInvalidRun
+	}
+	if !utf8.ValidString(id) || !utf8.ValidString(planID) {
+		return Run{}, Event{}, fmt.Errorf("%w: %w", ErrInvalidRun, ErrInvalidIdentity)
 	}
 	run := Run{
 		ID:          id,

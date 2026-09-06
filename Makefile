@@ -9,7 +9,7 @@ RESTIC_TEST_BINARY ?= restic
 TEST_PACKAGES ?= 2
 TEST_PARALLEL ?= 2
 
-.PHONY: build e2e-server lint security static test test-adapters test-adapters-race test-browser test-race trivy web-build
+.PHONY: build e2e-server lint security static test test-adapters test-adapters-race test-browser test-integration test-race trivy web-build
 
 test:
 	go test -p=$(TEST_PACKAGES) -parallel=$(TEST_PARALLEL) ./...
@@ -25,6 +25,9 @@ test-adapters:
 test-adapters-race:
 	@command -v "$(RESTIC_TEST_BINARY)" >/dev/null || { echo "restic >= 0.18.0 is required"; exit 1; }
 	RESTIC_TEST_BINARY="$$(command -v "$(RESTIC_TEST_BINARY)")" go test -race -p=$(TEST_PACKAGES) -parallel=$(TEST_PARALLEL) -tags=integration ./internal/source/restic
+
+test-integration:
+	go test -p=$(TEST_PACKAGES) -parallel=$(TEST_PARALLEL) -tags=integration ./internal/probe -run TestPostgreSQLProbeEnforcesReadOnlySingleStatementAndLeastPrivilege -count=1
 
 lint:
 	go vet ./...

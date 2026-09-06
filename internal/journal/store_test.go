@@ -17,6 +17,7 @@ import (
 
 	"github.com/azizu06/rehearse/internal/drill"
 	"github.com/azizu06/rehearse/internal/journal"
+	"github.com/azizu06/rehearse/internal/probe"
 	"github.com/azizu06/rehearse/internal/sandbox"
 	"github.com/azizu06/rehearse/internal/sandboxid"
 )
@@ -873,6 +874,26 @@ func TestStoreRejectsInvalidAndMissingRecords(t *testing.T) {
 	invalidPlan.Name = ""
 	if err := store.CreatePlan(ctx, invalidPlan); !errors.Is(err, drill.ErrInvalidPlan) {
 		t.Fatalf("invalid plan error = %v, want ErrInvalidPlan", err)
+	}
+	arguments := make([]string, 64)
+	for index := range arguments {
+		arguments[index] = strings.Repeat("a", 4096)
+	}
+	oversizedPlan := testPlan(now)
+	oversizedPlan.ID = "oversized-probe-plan"
+	oversizedPlan.Spec.ProbeConfig = probe.Config{
+		SchemaVersion: probe.SchemaVersion,
+		Probes: []probe.Spec{{
+			Ordinal: 1, ID: "large-command", Kind: probe.KindCommand, Required: true,
+			Retry:   probe.RetryPolicy{Deadline: time.Second, Backoff: 10 * time.Millisecond, MaxAttempts: 1},
+			Command: &probe.CommandSpec{Executable: "/usr/bin/true", Args: arguments, ExpectedExitCode: 0, TrustAcknowledged: true},
+		}},
+	}
+	if err := store.CreatePlan(ctx, oversizedPlan); !errors.Is(err, probe.ErrInvalidConfig) {
+		t.Fatalf("oversized probe plan error = %v, want ErrInvalidConfig", err)
+	}
+	if _, err := store.Plan(ctx, oversizedPlan.ID, oversizedPlan.Version); !errors.Is(err, journal.ErrNotFound) {
+		t.Fatalf("oversized probe plan persistence error = %v, want ErrNotFound", err)
 	}
 	plan := testPlan(now)
 	if err := store.CreatePlan(ctx, plan); err != nil {

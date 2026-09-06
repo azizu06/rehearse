@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"embed"
+	"errors"
 	"fmt"
 	"io/fs"
 	"sort"
@@ -13,7 +14,9 @@ import (
 )
 
 // CurrentSchemaVersion is the newest embedded SQLite migration.
-const CurrentSchemaVersion = 2
+const CurrentSchemaVersion = 3
+
+var ErrMigrationMismatch = errors.New("migration ledger mismatch")
 
 //go:embed migrations/*.sql
 var migrationFiles embed.FS
@@ -45,13 +48,16 @@ func applyMigrationsFromFS(ctx context.Context, database *sql.DB, files fs.FS, c
 	}
 
 	for _, item := range migrations {
-		var applied int
-		err := database.QueryRowContext(ctx, "SELECT COUNT(*) FROM schema_migrations WHERE version = ?", item.version).Scan(&applied)
-		if err != nil {
-			return fmt.Errorf("check migration %d: %w", item.version, err)
-		}
-		if applied == 1 {
+		var appliedName string
+		err := database.QueryRowContext(ctx, "SELECT name FROM schema_migrations WHERE version = ?", item.version).Scan(&appliedName)
+		if err == nil {
+			if appliedName != item.name {
+				return fmt.Errorf("%w: version %d records %q, expected %q", ErrMigrationMismatch, item.version, appliedName, item.name)
+			}
 			continue
+		}
+		if !errors.Is(err, sql.ErrNoRows) {
+			return fmt.Errorf("check migration %d: %w", item.version, err)
 		}
 
 		transaction, err := database.BeginTx(ctx, nil)

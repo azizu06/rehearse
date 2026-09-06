@@ -11,8 +11,10 @@ import (
 	"fmt"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/azizu06/rehearse/internal/drill"
+	"github.com/azizu06/rehearse/internal/probe"
 	"github.com/azizu06/rehearse/internal/sandboxid"
 	_ "modernc.org/sqlite"
 )
@@ -108,6 +110,14 @@ func (store *Store) CreatePlan(ctx context.Context, plan drill.Plan) error {
 	if err != nil {
 		return fmt.Errorf("encode credential references: %w", err)
 	}
+	probeConfig := ""
+	if !plan.Spec.ProbeConfig.IsZero() {
+		encoded, err := plan.Spec.ProbeConfig.CanonicalJSON()
+		if err != nil {
+			return fmt.Errorf("encode probe config: %w", err)
+		}
+		probeConfig = string(encoded)
+	}
 
 	transaction, err := store.database.BeginTx(ctx, nil)
 	if err != nil {
@@ -134,13 +144,14 @@ func (store *Store) CreatePlan(ctx context.Context, plan drill.Plan) error {
 	if _, err := transaction.ExecContext(
 		ctx,
 		`INSERT INTO plan_versions(
-            plan_id, version, source_kind, target_kind, credential_references, created_at
-        ) VALUES (?, ?, ?, ?, ?, ?)`,
+			plan_id, version, source_kind, target_kind, credential_references, probe_config, created_at
+		) VALUES (?, ?, ?, ?, ?, ?, ?)`,
 		plan.ID,
 		plan.Version,
 		plan.Spec.SourceKind,
 		plan.Spec.TargetKind,
 		string(references),
+		probeConfig,
 		formatTime(plan.CreatedAt),
 	); err != nil {
 		return fmt.Errorf("insert plan version: %w", err)
@@ -153,15 +164,21 @@ func (store *Store) CreatePlan(ctx context.Context, plan drill.Plan) error {
 
 // Plan loads one immutable plan version.
 func (store *Store) Plan(ctx context.Context, id string, version int64) (drill.Plan, error) {
+	return loadPlan(ctx, store.database, id, version)
+}
+
+func loadPlan(ctx context.Context, queryer rowQueryer, id string, version int64) (drill.Plan, error) {
 	var (
-		plan       drill.Plan
-		references string
-		createdAt  string
+		plan        drill.Plan
+		references  string
+		probeConfig string
+		createdAt   string
 	)
-	err := store.database.QueryRowContext(ctx, `
+	err := queryer.QueryRowContext(ctx, `
         SELECT plans.id, plans.name, plan_versions.version,
                plan_versions.source_kind, plan_versions.target_kind,
-               plan_versions.credential_references, plan_versions.created_at
+			   plan_versions.credential_references, plan_versions.probe_config,
+			   plan_versions.created_at
         FROM plans
         JOIN plan_versions ON plan_versions.plan_id = plans.id
         WHERE plans.id = ? AND plan_versions.version = ?
@@ -172,6 +189,7 @@ func (store *Store) Plan(ctx context.Context, id string, version int64) (drill.P
 		&plan.Spec.SourceKind,
 		&plan.Spec.TargetKind,
 		&references,
+		&probeConfig,
 		&createdAt,
 	)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -180,8 +198,17 @@ func (store *Store) Plan(ctx context.Context, id string, version int64) (drill.P
 	if err != nil {
 		return drill.Plan{}, fmt.Errorf("read plan: %w", err)
 	}
+	if !utf8.ValidString(plan.ID) || strings.TrimSpace(plan.ID) == "" {
+		return drill.Plan{}, fmt.Errorf("read plan identity: %w", drill.ErrInvalidIdentity)
+	}
 	if err := json.Unmarshal([]byte(references), &plan.Spec.CredentialReferences); err != nil {
 		return drill.Plan{}, fmt.Errorf("decode credential references: %w", err)
+	}
+	if probeConfig != "" {
+		plan.Spec.ProbeConfig, err = probe.ParseConfigBytes([]byte(probeConfig))
+		if err != nil {
+			return drill.Plan{}, fmt.Errorf("decode probe config: %w", err)
+		}
 	}
 	plan.CreatedAt, err = parseTime(createdAt)
 	if err != nil {
@@ -473,7 +500,15 @@ func (store *Store) RunsNeedingReconciliation(ctx context.Context) ([]drill.Run,
 
 // Events returns the immutable run history in sequence order.
 func (store *Store) Events(ctx context.Context, runID string) ([]drill.Event, error) {
-	rows, err := store.database.QueryContext(ctx, `
+	return loadEvents(ctx, store.database, runID)
+}
+
+type rowsQueryer interface {
+	QueryContext(context.Context, string, ...any) (*sql.Rows, error)
+}
+
+func loadEvents(ctx context.Context, queryer rowsQueryer, runID string) ([]drill.Event, error) {
+	rows, err := queryer.QueryContext(ctx, `
         SELECT sequence, kind, stage, outcome, cleanup_status, occurred_at
         FROM run_events
         WHERE run_id = ?
@@ -662,11 +697,11 @@ type rowScanner interface {
 	Scan(dest ...any) error
 }
 
-type runQueryer interface {
+type rowQueryer interface {
 	QueryRowContext(context.Context, string, ...any) *sql.Row
 }
 
-func loadRun(ctx context.Context, queryer runQueryer, id string) (drill.Run, error) {
+func loadRun(ctx context.Context, queryer rowQueryer, id string) (drill.Run, error) {
 	return scanRun(queryer.QueryRowContext(ctx, `
         SELECT id, plan_id, plan_version, stage, outcome, cleanup_status,
                created_at, updated_at, version, needs_reconciliation,
@@ -702,6 +737,9 @@ func scanRun(scanner rowScanner) (drill.Run, error) {
 	}
 	if err != nil {
 		return drill.Run{}, fmt.Errorf("scan run: %w", err)
+	}
+	if !utf8.ValidString(run.ID) || strings.TrimSpace(run.ID) == "" || !utf8.ValidString(run.PlanID) || strings.TrimSpace(run.PlanID) == "" {
+		return drill.Run{}, fmt.Errorf("read run identity: %w", drill.ErrInvalidIdentity)
 	}
 	if run.CreatedAt, err = parseTime(createdAt); err != nil {
 		return drill.Run{}, fmt.Errorf("parse run created time: %w", err)

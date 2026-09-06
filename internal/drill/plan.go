@@ -8,10 +8,15 @@ import (
 	"regexp"
 	"strings"
 	"time"
+	"unicode/utf8"
+
+	"github.com/azizu06/rehearse/internal/probe"
 )
 
 // ErrInvalidPlan identifies a plan that cannot safely enter the journal.
 var ErrInvalidPlan = errors.New("invalid drill plan")
+
+var ErrInvalidIdentity = errors.New("invalid text identity")
 
 // CredentialProvider identifies a supported out-of-band secret lookup.
 type CredentialProvider string
@@ -36,6 +41,7 @@ type PlanSpec struct {
 	SourceKind           string                `json:"source_kind"`
 	TargetKind           string                `json:"target_kind"`
 	CredentialReferences []CredentialReference `json:"credential_references,omitempty"`
+	ProbeConfig          probe.Config          `json:"probe_config,omitempty"`
 }
 
 // Plan is one immutable version of a drill definition.
@@ -58,6 +64,8 @@ func (plan Plan) Validate() error {
 	switch {
 	case strings.TrimSpace(plan.ID) == "":
 		return fmt.Errorf("%w: id is required", ErrInvalidPlan)
+	case !utf8.ValidString(plan.ID):
+		return fmt.Errorf("%w: id: %w", ErrInvalidPlan, ErrInvalidIdentity)
 	case strings.TrimSpace(plan.Name) == "":
 		return fmt.Errorf("%w: name is required", ErrInvalidPlan)
 	case plan.Version < 1:
@@ -73,6 +81,11 @@ func (plan Plan) Validate() error {
 	for index, reference := range plan.Spec.CredentialReferences {
 		if err := reference.validate(); err != nil {
 			return fmt.Errorf("%w: credential reference %d: %v", ErrInvalidPlan, index, err)
+		}
+	}
+	if !plan.Spec.ProbeConfig.IsZero() {
+		if err := plan.Spec.ProbeConfig.Validate(); err != nil {
+			return fmt.Errorf("%w: probe config: %v", ErrInvalidPlan, err)
 		}
 	}
 	return nil
