@@ -180,7 +180,7 @@ func TestS3CompatibleRepositoryListAndAcquireAreReadOnlyAtTheMinIOBoundary(t *te
 	)
 	container, err := miniocontainer.Run(
 		ctx,
-		"minio/minio:RELEASE.2024-01-16T16-07-38Z",
+		"quay.io/minio/minio:RELEASE.2024-01-16T16-07-38Z",
 		miniocontainer.WithUsername(accessKey),
 		miniocontainer.WithPassword(secretKey),
 	)
