@@ -1,94 +1,142 @@
 # Rehearse
 
-**Know your recovery works before the incident.**
+**Prove a backup can become a working application before an incident does.**
 
-Rehearse is an open-source recovery-drill platform for self-hosted applications. It restores a real backup into an isolated Docker Compose environment, starts the application, runs application-level probes, records recovery time and failures, and removes the temporary environment.
+Rehearse is a local recovery-rehearsal tool for Docker Compose applications. Its
+current MVP slice provides the safety-critical building blocks for a recovery
+drill: a localhost control plane, a durable SQLite run journal, a read-only
+restic source adapter, a bounded Docker Compose sandbox, typed probes, and
+redacted evidence reports. These components are covered by repository tests;
+the command that composes them into one end-to-end application recovery drill is
+the next integration step.
 
-> Project status: foundation phase. The tested Go/React tracer bullet, durable drill journal, isolated Docker Compose runner with startup reconciliation, vendor-independent source contract, and read-only restic adapter for local and S3-compatible repositories are in place. These integration boundaries are not yet wired into a complete recovery drill; that work is tracked in [Issue #11](https://github.com/azizu06/rehearse/issues/11).
+## What the current MVP demonstrates
 
-## Why Rehearse
+The shipped runtime and libraries keep recovery work local and make its outcome
+inspectable. Start the native binary to see the control plane and dashboard; run
+the focused tests to exercise the recovery boundaries below.
 
-A successful backup only proves that bytes were written. It does not prove that the data can be restored, the application can boot from it, or users can complete the workflows that matter. Teams often discover stale credentials, broken restore commands, schema incompatibilities, and missing dependencies during an actual incident.
-
-Rehearse turns that manual recovery rehearsal into a repeatable job with evidence.
-
-## The product loop
-
-```text
-backup source -> isolated restore -> boot services -> run probes -> report -> cleanup
+```mermaid
+flowchart LR
+    Operator[Operator] --> CP[Local Go control plane]
+    CP --> UI[Embedded browser dashboard]
+    Journal[SQLite run journal] --> Evidence[Immutable, redacted evidence report]
+    Restic[Restic source adapter] --> Artifact[Restored artifact]
+    Sandbox[Bounded Docker Compose sandbox] --> Probes[HTTP, TCP, command, SQL, and data probes]
+    Probes --> Evidence
 ```
 
-- One native Go application for macOS and Linux
-- Polished React dashboard served from `localhost`
-- Embedded SQLite state; no hosted control plane required
-- Docker Compose isolation for safe, disposable drills
-- Source adapters and restore-target adapters instead of a restic-only design
-- Prometheus metrics, optional Grafana dashboard, and CI-friendly reports
+The diagram is an architecture map of the components currently in the repository,
+not a claim that the control plane wires every recovery component into one user
+command yet.
 
-## Planned v1 support
+| Capability | Current evidence | Status |
+| --- | --- | --- |
+| Local Go control plane and embedded dashboard | `make build`; browser smoke test in [`web/e2e/tracer-bullet.spec.ts`](web/e2e/tracer-bullet.spec.ts) | Available |
+| Durable drill plans, ordered run states, restart reconciliation, and immutable SQLite history | [`internal/journal/store_test.go`](internal/journal/store_test.go) and [`internal/drill/run_test.go`](internal/drill/run_test.go) | Available as library/runtime boundary |
+| Read-only restic recovery-point listing and acquisition | [`internal/source/restic/integration_test.go`](internal/source/restic/integration_test.go) via `make test-adapters` | Available as source-adapter boundary |
+| Isolated Compose resources, cleanup, and crash reconciliation | [`internal/sandbox/docker_integration_test.go`](internal/sandbox/docker_integration_test.go) with `REHEARSE_DOCKER_INTEGRATION=1` | Available as sandbox boundary |
+| Typed HTTP, TCP, command, SQL, and data probes | [`docs/probes-and-evidence.md`](docs/probes-and-evidence.md); [`internal/probe`](internal/probe) tests | Available as probe boundary |
+| Canonical, redacted recovery evidence reports | [`internal/evidence/report_test.go`](internal/evidence/report_test.go) and [`internal/journal/report_store_test.go`](internal/journal/report_store_test.go) | Available as evidence boundary |
+| One command that restores, boots, probes, reports, and cleans up an application | — | Planned integration |
 
-| Layer | v1 adapters |
-|---|---|
-| Backup sources | restic repositories, local files/archives, plain S3 objects, trusted custom commands |
-| Restore targets | files/Docker volumes, PostgreSQL, MySQL/MariaDB, SQLite, trusted custom commands |
-| Verification | HTTP, TCP, command, SQL, and data assertions |
-| Output | Web report, JSON, JUnit, Prometheus metrics |
+## A short demo path
 
-The core runtime does **not** require RabbitMQ or PostgreSQL. An optional queued-orders reference application uses both to prove that Rehearse can recover and verify a realistic multi-service workload.
+From a fresh checkout, install the web dependencies, build the native binary,
+and open the local dashboard:
 
-## Roadmap
+```bash
+npm --prefix web ci
+make build
+./build/rehearse
+```
 
-- **v0.1 — four-week public milestone:** one trustworthy end-to-end restic-to-PostgreSQL recovery drill, UI timeline and report, metrics, reference workload, and release packaging.
-- **v1.0 — resume-ready product:** the full source/target adapter matrix, safety hardening, CI mode, AWS/Terraform proof, external onboarding, and release audit.
-- **Later:** Kubernetes runner, Windows, native RDS/Supabase/MongoDB adapters, and team tenancy.
+Visit <http://127.0.0.1:8484>. The dashboard verifies its connection to the
+versioned local API. In another terminal, confirm the control plane directly:
 
-See [PRD.md](PRD.md), [CONTEXT.md](CONTEXT.md), the [architecture decisions](docs/adr/), and the [probe/evidence contract](docs/probes-and-evidence.md) for the committed scope. Work is tracked in [GitHub Issues](https://github.com/azizu06/rehearse/issues) and the public [Rehearse delivery board](https://github.com/users/azizu06/projects/4).
+```bash
+curl http://127.0.0.1:8484/api/v1/health
+curl http://127.0.0.1:8484/api/v1/version
+```
 
-## Engineering standards
+The following sequence describes the tested recovery path at the component
+boundaries. The orchestration arrows are deliberately dashed: they are not yet
+exposed as a complete user-facing drill command.
 
-Rehearse is developed issue-first with tracer-bullet TDD. Go code uses the standard `testing` package, race detection, fuzz tests where parsers cross trust boundaries, and Testcontainers for real service integration. The frontend uses Vitest, React Testing Library, and Playwright. Every pull request follows the review policy in [docs/agents/review-policy.md](docs/agents/review-policy.md).
+```mermaid
+sequenceDiagram
+    participant O as Operator
+    participant R as Restic adapter
+    participant S as Compose sandbox
+    participant P as Probe runner
+    participant J as SQLite journal
+    participant E as Evidence report
+    O->>R: Select and acquire a recovery point
+    R-->>O: Restored artifact
+    O-->>S: Supply artifact to isolated sandbox
+    S-->>P: Run required probes
+    P-->>E: Ordered probe evidence
+    O-->>J: Persist run and cleanup state
+    J-->>E: Persist immutable report snapshot
+```
 
-## Development
+## Verify the shipped boundaries
 
-The tracer-bullet toolchain requires the Go version declared in `go.mod` and Node.js 22.
+Prerequisites: Go **1.26.8** (the version in [`go.mod`](go.mod)), Node.js 22 or
+newer, and npm. Docker is required only for the integration commands below.
 
 ```bash
 npm --prefix web ci
 make test
-make test-race
-make test-integration
-make test-adapters
 make lint
-make static
 make build
 ```
 
-`make test-adapters` exercises real local and S3-compatible restic repositories. It requires restic 0.18.0 or newer plus a Docker-compatible runtime for the Testcontainers-managed S3 service. Orchestration must successfully preflight every newly configured adapter instance before listing or acquisition. Use `make test-adapters-race` to run the same boundary checks with Go's race detector.
+`make test` runs the Go and web unit suites. `make lint` runs `go vet` and the
+web linter. `make build` rebuilds the embedded dashboard and the native binary.
 
-`make security` adds `govulncheck` plus a pinned Trivy filesystem scan. It requires Trivy 0.72.0 on `PATH`, or `TRIVY=/path/to/trivy`; CI installs the same scanner version.
-
-The real sandbox boundary is opt-in locally because it creates short-lived
-labeled Docker resources. It requires the pinned Alpine fixture image to exist
-before the runner starts; the runner itself never builds or pulls images:
-
-`DockerRunner.Run` accepts a trusted in-process orchestration callback. The
-callback must honor its context and return before the runner cleans the sandbox.
-Interruptible workload operations should use context-bound subprocess or Docker
-boundaries rather than detached goroutines.
+For the optional real-boundary checks, install restic 0.18.0 or newer and ensure
+a Docker-compatible runtime is running:
 
 ```bash
+make test-adapters
+make test-integration
 docker pull alpine@sha256:28bd5fe8b56d1bd048e5babf5b10710ebe0bae67db86916198a6eec434943f8b
 REHEARSE_DOCKER_INTEGRATION=1 go test -race ./internal/sandbox -count=1
 ```
 
-`make test` is the single command for the Go and frontend unit suites. To run the browser smoke path against a freshly built native binary:
+`make test-adapters` uses real local and S3-compatible restic repositories.
+`make test-integration` verifies the PostgreSQL probe boundary. The sandbox test
+creates short-lived, Rehearse-labeled Docker resources and verifies cleanup.
 
-```bash
-npm --prefix web exec -- playwright install chromium
-make test-browser
-```
+## Why these boundaries exist
 
-The binary listens on `127.0.0.1:8484` by default. Start it with `./build/rehearse`, then open <http://127.0.0.1:8484>.
+- **Local control plane:** Rehearse is a native Go binary that serves an embedded
+  browser UI. Recovery data and credentials stay on the operator's machine.
+- **SQLite journal:** plans, ordered run events, and cleanup truth are durable;
+  cleanup is recorded separately from the execution outcome so a passing probe
+  cannot disguise a failed cleanup.
+- **Separate source and restore boundaries:** restic handles selecting and
+  acquiring backup data without dictating how a target restores it.
+- **Bounded Compose sandbox:** generated, labeled resources are isolated from
+  unrelated Docker workloads and cleanup verifies ownership before deletion.
+- **Evidence, not a success string:** reports preserve stage durations, selected
+  recovery point, probe evidence, outcome, and cleanup state while redacting
+  configured secret markers.
+
+The design decisions and exact contracts are documented in
+[`CONTEXT.md`](CONTEXT.md), [`docs/adr/`](docs/adr/), and
+[`docs/probes-and-evidence.md`](docs/probes-and-evidence.md).
+
+## Current limitations
+
+- Rehearse does not yet ship a complete end-to-end recovery workflow that joins
+  source acquisition, restore targeting, sandbox boot, probes, reporting, and
+  cleanup behind one CLI or dashboard action.
+- The current restic adapter and Compose sandbox are tested boundaries, not a
+  promise of every backup source, restore target, or application topology.
+- The dashboard currently proves the local control-plane connection; it is not a
+  run-management interface.
 
 ## License
 
