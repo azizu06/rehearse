@@ -17,6 +17,30 @@ func TestEqualLengthOverlappingMarkersUseStableOrder(t *testing.T) {
 	}
 }
 
+func TestMaxMarkerBytes(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		markers []string
+		want    int
+	}{
+		{name: "no markers", markers: nil, want: 0},
+		{name: "only empty marker", markers: []string{""}, want: 0},
+		{name: "single marker", markers: []string{"secret"}, want: len("secret")},
+		{name: "longest marker wins", markers: []string{"ab", "abcdefgh", "abcd"}, want: len("abcdefgh")},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+
+			if got := redact.New(test.markers...).MaxMarkerBytes(); got != test.want {
+				t.Fatalf("MaxMarkerBytes() = %d, want %d", got, test.want)
+			}
+		})
+	}
+}
+
 func TestBoundedStringDoesNotExposeMarkerPrefixAfterEarlierRedactions(t *testing.T) {
 	t.Parallel()
 
