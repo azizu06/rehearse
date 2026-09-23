@@ -2,6 +2,7 @@ package evidence_test
 
 import (
 	"bytes"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -135,6 +136,109 @@ func TestParseJSONAcceptsMaximumBoundedProbeEvidence(t *testing.T) {
 	if _, err := evidence.ParseJSON(encoded); err != nil {
 		t.Fatalf("ParseJSON rejected valid bounded report: %v", err)
 	}
+}
+
+func TestReportViewCanonicalJSON(t *testing.T) {
+	t.Parallel()
+
+	validView := func() evidence.ReportView {
+		report := validReport()
+		report.SnapshotSequence = 5
+		report.SnapshotAt = report.Stages[0].StartedAt
+		return evidence.ReportView{
+			Snapshot: report,
+			CurrentCleanup: evidence.CurrentCleanup{
+				Status:       drill.CleanupSucceeded,
+				AsOfSequence: 5,
+				AsOf:         report.Stages[0].StartedAt,
+			},
+		}
+	}
+
+	tests := []struct {
+		name    string
+		mutate  func(*evidence.ReportView)
+		wantErr error
+	}{
+		{name: "valid view", mutate: func(*evidence.ReportView) {}, wantErr: nil},
+		{
+			name: "later pending cleanup at a newer sequence",
+			mutate: func(view *evidence.ReportView) {
+				view.CurrentCleanup.Status = drill.CleanupPending
+				view.CurrentCleanup.AsOfSequence = 6
+				view.CurrentCleanup.AsOf = view.Snapshot.SnapshotAt.Add(time.Minute)
+			},
+			wantErr: nil,
+		},
+		{
+			name: "zero snapshot sequence",
+			mutate: func(view *evidence.ReportView) {
+				view.Snapshot.SnapshotSequence = 0
+				view.Snapshot.SnapshotAt = time.Time{}
+			},
+			wantErr: evidence.ErrInvalidReport,
+		},
+		{
+			name:    "invalid cleanup status",
+			mutate:  func(view *evidence.ReportView) { view.CurrentCleanup.Status = "unknown" },
+			wantErr: evidence.ErrInvalidReport,
+		},
+		{
+			name:    "as-of sequence older than snapshot sequence",
+			mutate:  func(view *evidence.ReportView) { view.CurrentCleanup.AsOfSequence = 4 },
+			wantErr: evidence.ErrInvalidReport,
+		},
+		{
+			name:    "as-of time before snapshot time",
+			mutate:  func(view *evidence.ReportView) { view.CurrentCleanup.AsOf = view.Snapshot.SnapshotAt.Add(-time.Second) },
+			wantErr: evidence.ErrInvalidReport,
+		},
+		{
+			name: "same sequence but cleanup status contradicts snapshot",
+			mutate: func(view *evidence.ReportView) {
+				view.CurrentCleanup.Status = drill.CleanupFailed
+			},
+			wantErr: evidence.ErrInvalidReport,
+		},
+		{
+			name: "same sequence but as-of time contradicts snapshot",
+			mutate: func(view *evidence.ReportView) {
+				view.CurrentCleanup.AsOf = view.Snapshot.SnapshotAt.Add(time.Second)
+			},
+			wantErr: evidence.ErrInvalidReport,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			view := validView()
+			test.mutate(&view)
+			encoded, err := view.CanonicalJSON(redact.Redactor{})
+			if test.wantErr == nil {
+				if err != nil {
+					t.Fatalf("CanonicalJSON() error = %v, want nil", err)
+				}
+				if _, err := evidence.ParseJSON(mustReportViewSnapshot(t, encoded)); err != nil {
+					t.Fatalf("re-parsing encoded snapshot failed: %v", err)
+				}
+				return
+			}
+			if !errors.Is(err, test.wantErr) {
+				t.Fatalf("CanonicalJSON() error = %v, want %v", err, test.wantErr)
+			}
+		})
+	}
+}
+
+func mustReportViewSnapshot(t *testing.T, encoded []byte) []byte {
+	t.Helper()
+	var view struct {
+		Snapshot json.RawMessage `json:"snapshot"`
+	}
+	if err := json.Unmarshal(encoded, &view); err != nil {
+		t.Fatalf("decode ReportView: %v", err)
+	}
+	return view.Snapshot
 }
 
 func validReport() evidence.Report {
