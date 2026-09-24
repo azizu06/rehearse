@@ -25,7 +25,10 @@ The metrics are fed by the SQLite journal. A journal opened with
 `journal.WithRunObserver(recorder)` reports every committed run change to the
 recorder after its transaction commits, so rejected or rolled-back changes are
 never counted. A stage interval that spans a Rehearse restart is not measured,
-because restart reconciliation makes its start time meaningless.
+because restart reconciliation makes its start time meaningless. For the same
+reason, a cleanup retry that follows reconciliation is counted in
+`rehearse_drill_cleanup_failures_total` if it fails but its duration is not
+observed.
 
 ## Start the optional stack
 
@@ -59,8 +62,10 @@ The dashboard JSON is
 [`deploy/observability/grafana/dashboards/rehearse.json`](../deploy/observability/grafana/dashboards/rehearse.json).
 Every panel reads the dashboard time range (default: last 7 days).
 
-- **Time since last successful drill:** age of the newest succeeded outcome in
-  the range. Empty means nothing succeeded in that range.
+- **Time since last successful drill:** age of the newest success timestamp
+  Rehearse reported during the range. The gauge keeps reporting an earlier
+  success while the process runs, so an older success still shows. Empty means
+  no success was reported in the range, for example after a restart.
 - **Cleanup failures:** failed cleanup attempts in the range. Any value above
   zero means labeled resources waited for the janitor.
 - **Drill outcomes:** runs per outcome in the range.

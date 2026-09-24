@@ -25,7 +25,7 @@
       "id": 1,
       "type": "stat",
       "title": "Time since last successful drill",
-      "description": "Age of the newest succeeded drill outcome in the selected time range. Empty means no drill succeeded in that range. The gauge resets to 0 when Rehearse restarts, so the query takes the maximum over the range.",
+      "description": "Age of the newest successful drill timestamp that Rehearse reported during the selected time range. The gauge keeps reporting an earlier success until the next one, so an old success still shows while Rehearse keeps running. Empty means no success was reported in the range, for example after a restart with no success since.",
       "datasource": {
         "type": "prometheus",
         "uid": "rehearse-prometheus"

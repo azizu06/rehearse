@@ -46,8 +46,10 @@ type Store struct {
 // RunObserver receives each run state-machine change after its transaction
 // commits, so rejected or rolled-back changes are never observed. before is
 // the prior projection (zero for a new run). Changes made by restart
-// reconciliation inside Open are not observed. Implementations must return
-// quickly and must not call back into the Store.
+// reconciliation inside Open are not observed. Each call carries a consistent
+// before/after pair, but concurrent mutations may be delivered in a different
+// order than they committed. Implementations must be safe for concurrent use,
+// return quickly, and not call back into the Store.
 type RunObserver interface {
 	ObserveRunChange(before, after drill.Run, event drill.Event)
 }
