@@ -40,11 +40,29 @@ var (
 type Store struct {
 	database  *sql.DB
 	ownership *journalOwnership
+	observer  RunObserver
+}
+
+// RunObserver receives each run state-machine change after its transaction
+// commits, so rejected or rolled-back changes are never observed. before is
+// the prior projection (zero for a new run). Changes made by restart
+// reconciliation inside Open are not observed. Implementations must return
+// quickly and must not call back into the Store.
+type RunObserver interface {
+	ObserveRunChange(before, after drill.Run, event drill.Event)
+}
+
+// Option configures a Store at Open.
+type Option func(*Store)
+
+// WithRunObserver notifies observer of every committed run change.
+func WithRunObserver(observer RunObserver) Option {
+	return func(store *Store) { store.observer = observer }
 }
 
 // Open opens or creates a journal, applies embedded migrations, and marks any
 // interrupted run for restart reconciliation.
-func Open(ctx context.Context, path string) (*Store, error) {
+func Open(ctx context.Context, path string, options ...Option) (*Store, error) {
 	if strings.TrimSpace(path) == "" {
 		return nil, errors.New("journal path is required")
 	}
@@ -82,6 +100,9 @@ func Open(ctx context.Context, path string) (*Store, error) {
 	store := &Store{database: database, ownership: ownership}
 	if err := store.requireRestartReconciliation(ctx, time.Now().UTC()); err != nil {
 		return closeWithError(err)
+	}
+	for _, option := range options {
+		option(store)
 	}
 	return store, nil
 }
@@ -238,6 +259,7 @@ func (store *Store) CreateRun(ctx context.Context, id, planID string, planVersio
 	if err := transaction.Commit(); err != nil {
 		return drill.Run{}, fmt.Errorf("commit run: %w", err)
 	}
+	store.notify(drill.Run{}, run, event)
 	return run, nil
 }
 
@@ -564,6 +586,7 @@ func (store *Store) mutateRunWith(
 	if err != nil {
 		return drill.Run{}, err
 	}
+	before := run
 	previousVersion := run.Version
 	event, err := mutation(&run)
 	if err != nil {
@@ -606,7 +629,14 @@ func (store *Store) mutateRunWith(
 	if err := transaction.Commit(); err != nil {
 		return drill.Run{}, fmt.Errorf("commit run mutation: %w", err)
 	}
+	store.notify(before, run, event)
 	return run, nil
+}
+
+func (store *Store) notify(before, after drill.Run, event drill.Event) {
+	if store.observer != nil {
+		store.observer.ObserveRunChange(before, after, event)
+	}
 }
 
 func (store *Store) requireRestartReconciliation(ctx context.Context, at time.Time) error {

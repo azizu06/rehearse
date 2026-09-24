@@ -1,0 +1,253 @@
+{
+  "uid": "rehearse-drills",
+  "title": "Rehearse recovery drills",
+  "description": "Recovery drill outcomes, stage durations, cleanup failures, and time since the last successful drill, read from Rehearse /metrics.",
+  "tags": [
+    "rehearse"
+  ],
+  "editable": false,
+  "schemaVersion": 41,
+  "version": 1,
+  "time": {
+    "from": "now-7d",
+    "to": "now"
+  },
+  "refresh": "1m",
+  "timezone": "browser",
+  "templating": {
+    "list": []
+  },
+  "annotations": {
+    "list": []
+  },
+  "panels": [
+    {
+      "id": 1,
+      "type": "stat",
+      "title": "Time since last successful drill",
+      "description": "Age of the newest succeeded drill outcome in the selected time range. Empty means no drill succeeded in that range. The gauge resets to 0 when Rehearse restarts, so the query takes the maximum over the range.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "rehearse-prometheus"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 0,
+        "w": 8,
+        "h": 6
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "rehearse-prometheus"
+          },
+          "expr": "time() - (max_over_time(rehearse_drill_last_success_timestamp_seconds[$__range]) > 0)",
+          "instant": true,
+          "range": false,
+          "legendFormat": "__auto",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s"
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        }
+      }
+    },
+    {
+      "id": 2,
+      "type": "stat",
+      "title": "Cleanup failures",
+      "description": "Cleanup attempts that failed in the selected time range. Each failure leaves labeled resources for the startup janitor, so any value above zero deserves a look.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "rehearse-prometheus"
+      },
+      "gridPos": {
+        "x": 8,
+        "y": 0,
+        "w": 8,
+        "h": 6
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "rehearse-prometheus"
+          },
+          "expr": "sum(increase(rehearse_drill_cleanup_failures_total[$__range]))",
+          "instant": true,
+          "range": false,
+          "legendFormat": "__auto",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "decimals": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        }
+      }
+    },
+    {
+      "id": 3,
+      "type": "bargauge",
+      "title": "Drill outcomes",
+      "description": "Drill runs that reached an execution outcome in the selected time range, split by outcome: succeeded, failed, cancelled, or timed_out. Cleanup is tracked separately.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "rehearse-prometheus"
+      },
+      "gridPos": {
+        "x": 16,
+        "y": 0,
+        "w": 8,
+        "h": 6
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "rehearse-prometheus"
+          },
+          "expr": "sum by (outcome) (increase(rehearse_drill_runs_total[$__range]))",
+          "instant": true,
+          "range": false,
+          "legendFormat": "{{outcome}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "decimals": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "orientation": "horizontal",
+        "displayMode": "basic"
+      }
+    },
+    {
+      "id": 4,
+      "type": "bargauge",
+      "title": "Mean stage duration",
+      "description": "Average time runs spent in each state-machine stage during the selected range. Stages interrupted by a Rehearse restart are not measured.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "rehearse-prometheus"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 6,
+        "w": 12,
+        "h": 9
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "rehearse-prometheus"
+          },
+          "expr": "sum by (stage) (increase(rehearse_drill_stage_duration_seconds_sum[$__range])) / sum by (stage) (increase(rehearse_drill_stage_duration_seconds_count[$__range]))",
+          "instant": true,
+          "range": false,
+          "legendFormat": "{{stage}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s"
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "orientation": "horizontal",
+        "displayMode": "basic"
+      }
+    },
+    {
+      "id": 5,
+      "type": "bargauge",
+      "title": "p95 stage duration",
+      "description": "95th percentile time per stage during the selected range, estimated from histogram buckets. Use it to spot a slow restore, boot, or probe stage before it threatens recovery time.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "rehearse-prometheus"
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 6,
+        "w": 12,
+        "h": 9
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "rehearse-prometheus"
+          },
+          "expr": "histogram_quantile(0.95, sum by (le, stage) (increase(rehearse_drill_stage_duration_seconds_bucket[$__range])))",
+          "instant": true,
+          "range": false,
+          "legendFormat": "{{stage}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s"
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "orientation": "horizontal",
+        "displayMode": "basic"
+      }
+    }
+  ]
+}

@@ -38,6 +38,7 @@ command yet.
 | Isolated Compose resources, cleanup, and crash reconciliation | [`internal/sandbox/docker_integration_test.go`](internal/sandbox/docker_integration_test.go) with `REHEARSE_DOCKER_INTEGRATION=1` | Available as sandbox boundary |
 | Typed HTTP, TCP, command, SQL, and data probes | [`docs/probes-and-evidence.md`](docs/probes-and-evidence.md); [`internal/probe`](internal/probe) tests | Available as probe boundary |
 | Canonical, redacted recovery evidence reports | [`internal/evidence/report_test.go`](internal/evidence/report_test.go) and [`internal/journal/report_store_test.go`](internal/journal/report_store_test.go) | Available as evidence boundary |
+| Prometheus `/metrics` fed by committed journal run changes, plus an optional Grafana dashboard | [`docs/observability.md`](docs/observability.md); [`internal/metrics`](internal/metrics) tests | Available as metrics boundary; drill series stay at zero until a workflow runs drills |
 | One command that restores, boots, probes, reports, and cleans up an application | — | Planned integration |
 
 ## A short demo path
@@ -125,8 +126,9 @@ creates short-lived, Rehearse-labeled Docker resources and verifies cleanup.
   configured secret markers.
 
 The design decisions and exact contracts are documented in
-[`CONTEXT.md`](CONTEXT.md), [`docs/adr/`](docs/adr/), and
-[`docs/probes-and-evidence.md`](docs/probes-and-evidence.md).
+[`CONTEXT.md`](CONTEXT.md), [`docs/adr/`](docs/adr/),
+[`docs/probes-and-evidence.md`](docs/probes-and-evidence.md), and
+[`docs/observability.md`](docs/observability.md).
 
 ## Current limitations
 

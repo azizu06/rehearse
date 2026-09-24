@@ -6,12 +6,14 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/azizu06/rehearse/internal/controlplane"
 	"github.com/azizu06/rehearse/internal/drill"
 	"github.com/azizu06/rehearse/internal/evidence"
+	"github.com/azizu06/rehearse/internal/metrics"
 	"github.com/azizu06/rehearse/internal/probe"
 	"github.com/azizu06/rehearse/internal/redact"
 )
@@ -131,6 +133,26 @@ func TestDashboardIsServedOutsideTheAPINamespace(t *testing.T) {
 
 	if response.Code != http.StatusTeapot {
 		t.Fatalf("status = %d, want %d", response.Code, http.StatusTeapot)
+	}
+}
+
+func TestMetricsEndpointServesPrometheusExposition(t *testing.T) {
+	t.Parallel()
+
+	handler := controlplane.NewHandler(controlplane.Options{Metrics: metrics.New().Handler()})
+	request := httptest.NewRequest(http.MethodGet, "/metrics", nil)
+	response := httptest.NewRecorder()
+
+	handler.ServeHTTP(response, request)
+
+	if response.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d", response.Code, http.StatusOK)
+	}
+	if got := response.Header().Get("Content-Type"); !strings.HasPrefix(got, "text/plain") {
+		t.Fatalf("content type = %q, want Prometheus text exposition", got)
+	}
+	if body := response.Body.String(); !strings.Contains(body, `rehearse_drill_runs_total{outcome="succeeded"} 0`) {
+		t.Fatalf("metrics body is missing the drill outcome series:\n%s", body)
 	}
 }
 

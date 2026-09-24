@@ -1,0 +1,8 @@
+global:
+  scrape_interval: 15s
+
+scrape_configs:
+  - job_name: rehearse
+    static_configs:
+      # Rehearse listens on the host, outside this compose project.
+      - targets: ["host.docker.internal:8484"]

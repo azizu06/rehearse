@@ -12,7 +12,7 @@ The live [GitHub Project](https://github.com/users/azizu06/projects/4) is author
 | [#10](https://github.com/azizu06/rehearse/issues/10) | Probes + evidence reports | #5, #6 | v0.1 |
 | [#11](https://github.com/azizu06/rehearse/issues/11) | First real recovery drill | #6-#10 | v0.1 |
 | [#12](https://github.com/azizu06/rehearse/issues/12) | Authenticated plan/run/history UI | #5, #6, #11 | v0.1 |
-| [#13](https://github.com/azizu06/rehearse/issues/13) | Scheduling + Prometheus/Grafana | #6, #11, #12 | v0.1 |
+| [#13](https://github.com/azizu06/rehearse/issues/13) | Scheduling | #6, #11, #12 | v0.1 |
 | [#14](https://github.com/azizu06/rehearse/issues/14) | RabbitMQ/PostgreSQL reference workload | #11 | v0.1 |
 | [#15](https://github.com/azizu06/rehearse/issues/15) | Public v0.1 package and release | #12-#14 | v0.1 |
 | [#16](https://github.com/azizu06/rehearse/issues/16) | Plain local/S3 object + command sources | #7, #11 | v1.0 |
@@ -22,5 +22,6 @@ The live [GitHub Project](https://github.com/users/azizu06/projects/4) is author
 | [#20](https://github.com/azizu06/rehearse/issues/20) | AWS/S3 Terraform proof | #16, #18 | v1.0 |
 | [#21](https://github.com/azizu06/rehearse/issues/21) | External beta + product demo | #15-#20 | v1.0 |
 | [#22](https://github.com/azizu06/rehearse/issues/22) | Final completion audit + v1 release | #16-#21 | v1.0 |
+| [#66](https://github.com/azizu06/rehearse/issues/66) | Prometheus metrics + optional Grafana dashboard (split from #13) | #6 | v0.1 |
 
 For current actionability, use the live project. When a prerequisite closes, the coordinator verifies all remaining dependencies before removing the `blocked` label from a newly actionable issue.
