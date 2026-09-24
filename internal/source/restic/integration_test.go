@@ -180,7 +180,10 @@ func TestS3CompatibleRepositoryListAndAcquireAreReadOnlyAtTheMinIOBoundary(t *te
 	)
 	container, err := miniocontainer.Run(
 		ctx,
-		"quay.io/minio/minio:RELEASE.2024-01-16T16-07-38Z",
+		// Quay now requires authentication for MinIO pulls and upstream no longer
+		// publishes community images, so use the pgsty community rebuild, pinned
+		// by tag and multi-arch index digest.
+		"pgsty/minio:RELEASE.2026-08-04T00-00-00Z@sha256:b6bfe7239bfc83fb90d31612d9704d86039dd714f7904b3f1ad68f211e602372",
 		miniocontainer.WithUsername(accessKey),
 		miniocontainer.WithPassword(secretKey),
 	)
