@@ -25,10 +25,9 @@ The metrics are fed by the SQLite journal. A journal opened with
 `journal.WithRunObserver(recorder)` reports every committed run change to the
 recorder after its transaction commits, so rejected or rolled-back changes are
 never counted. A stage interval that spans a Rehearse restart is not measured,
-because restart reconciliation makes its start time meaningless. For the same
-reason, a cleanup retry that follows reconciliation is counted in
-`rehearse_drill_cleanup_failures_total` if it fails but its duration is not
-observed.
+because restart reconciliation makes its start time meaningless. A cleanup
+retry that the janitor begins while Rehearse is running is measured from its
+retry event. Changes reach the recorder one at a time in commit order.
 
 ## Start the optional stack
 

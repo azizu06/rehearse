@@ -13,13 +13,6 @@
     "to": "now"
   },
   "refresh": "1m",
-  "timezone": "browser",
-  "templating": {
-    "list": []
-  },
-  "annotations": {
-    "list": []
-  },
   "panels": [
     {
       "id": 1,
@@ -38,22 +31,15 @@
       },
       "targets": [
         {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "rehearse-prometheus"
-          },
           "expr": "time() - (max_over_time(rehearse_drill_last_success_timestamp_seconds[$__range]) > 0)",
           "instant": true,
-          "range": false,
-          "legendFormat": "__auto",
           "refId": "A"
         }
       ],
       "fieldConfig": {
         "defaults": {
           "unit": "s"
-        },
-        "overrides": []
+        }
       },
       "options": {
         "reduceOptions": {
@@ -82,14 +68,8 @@
       },
       "targets": [
         {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "rehearse-prometheus"
-          },
           "expr": "sum(increase(rehearse_drill_cleanup_failures_total[$__range]))",
           "instant": true,
-          "range": false,
-          "legendFormat": "__auto",
           "refId": "A"
         }
       ],
@@ -97,8 +77,7 @@
         "defaults": {
           "unit": "short",
           "decimals": 0
-        },
-        "overrides": []
+        }
       },
       "options": {
         "reduceOptions": {
@@ -127,13 +106,8 @@
       },
       "targets": [
         {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "rehearse-prometheus"
-          },
           "expr": "sum by (outcome) (increase(rehearse_drill_runs_total[$__range]))",
           "instant": true,
-          "range": false,
           "legendFormat": "{{outcome}}",
           "refId": "A"
         }
@@ -142,8 +116,7 @@
         "defaults": {
           "unit": "short",
           "decimals": 0
-        },
-        "overrides": []
+        }
       },
       "options": {
         "reduceOptions": {
@@ -174,13 +147,8 @@
       },
       "targets": [
         {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "rehearse-prometheus"
-          },
           "expr": "sum by (stage) (increase(rehearse_drill_stage_duration_seconds_sum[$__range])) / sum by (stage) (increase(rehearse_drill_stage_duration_seconds_count[$__range]))",
           "instant": true,
-          "range": false,
           "legendFormat": "{{stage}}",
           "refId": "A"
         }
@@ -188,8 +156,7 @@
       "fieldConfig": {
         "defaults": {
           "unit": "s"
-        },
-        "overrides": []
+        }
       },
       "options": {
         "reduceOptions": {
@@ -220,13 +187,8 @@
       },
       "targets": [
         {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "rehearse-prometheus"
-          },
           "expr": "histogram_quantile(0.95, sum by (le, stage) (increase(rehearse_drill_stage_duration_seconds_bucket[$__range])))",
           "instant": true,
-          "range": false,
           "legendFormat": "{{stage}}",
           "refId": "A"
         }
@@ -234,8 +196,7 @@
       "fieldConfig": {
         "defaults": {
           "unit": "s"
-        },
-        "overrides": []
+        }
       },
       "options": {
         "reduceOptions": {

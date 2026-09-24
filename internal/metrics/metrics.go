@@ -45,6 +45,9 @@ type Recorder struct {
 
 	mu              sync.Mutex
 	lastSuccessTime time.Time
+	// retrying marks runs whose cleanup retry this recorder saw begin, until
+	// the retry result arrives. Run IDs stay in memory and never become labels.
+	retrying map[string]bool
 }
 
 // New creates a recorder with process, Go runtime, and drill metrics
@@ -53,6 +56,7 @@ type Recorder struct {
 func New() *Recorder {
 	recorder := &Recorder{
 		registry: prometheus.NewRegistry(),
+		retrying: map[string]bool{},
 		runs: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Name: "rehearse_drill_runs_total",
 			Help: "Drill runs that reached an execution outcome.",
@@ -103,9 +107,17 @@ func (recorder *Recorder) Handler() http.Handler {
 // and after is the projection the change produced.
 func (recorder *Recorder) ObserveRunChange(before, after drill.Run, event drill.Event) {
 	switch event.Kind {
-	case drill.EventStageStarted, drill.EventCleanupSucceeded, drill.EventCleanupFailed,
-		drill.EventRunSucceeded, drill.EventRunFailed, drill.EventRunCancelled, drill.EventRunTimedOut:
+	case drill.EventStageStarted, drill.EventRunSucceeded, drill.EventRunFailed,
+		drill.EventRunCancelled, drill.EventRunTimedOut:
 		recorder.observeStageEnd(before, event.OccurredAt)
+	case drill.EventCleanupSucceeded, drill.EventCleanupFailed:
+		recorder.observeCleanupEnd(before, event.OccurredAt)
+	case drill.EventReconciliationRequired:
+		if before.Cleanup == drill.CleanupFailed && after.Cleanup == drill.CleanupPending {
+			recorder.mu.Lock()
+			recorder.retrying[after.ID] = true
+			recorder.mu.Unlock()
+		}
 	}
 	switch event.Kind {
 	case drill.EventRunSucceeded, drill.EventRunFailed, drill.EventRunCancelled, drill.EventRunTimedOut:
@@ -132,6 +144,21 @@ func (recorder *Recorder) observeStageEnd(before drill.Run, endedAt time.Time) {
 		return
 	}
 	recorder.stageDuration.WithLabelValues(string(before.Stage)).Observe(elapsed.Seconds())
+}
+
+// observeCleanupEnd measures a cleanup attempt. A retry this recorder saw
+// begin started at the retry event, which is the projection's UpdatedAt, so it
+// is measured even though the run still awaits reconciliation. Any other
+// reconciled interval spans a restart and is skipped by observeStageEnd.
+func (recorder *Recorder) observeCleanupEnd(before drill.Run, endedAt time.Time) {
+	recorder.mu.Lock()
+	retried := recorder.retrying[before.ID]
+	delete(recorder.retrying, before.ID)
+	recorder.mu.Unlock()
+	if retried {
+		before.NeedsReconciliation = false
+	}
+	recorder.observeStageEnd(before, endedAt)
 }
 
 func (recorder *Recorder) recordSuccess(at time.Time) {
