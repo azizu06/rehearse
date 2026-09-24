@@ -8,6 +8,7 @@ import (
 
 	"github.com/azizu06/rehearse/internal/controlplane"
 	"github.com/azizu06/rehearse/internal/dashboard"
+	"github.com/azizu06/rehearse/internal/metrics"
 )
 
 var version = "dev"
@@ -21,9 +22,14 @@ func main() {
 		log.Fatalf("prepare dashboard: %v", err)
 	}
 
+	recorder := metrics.New()
 	server := &http.Server{
-		Addr:              *address,
-		Handler:           controlplane.NewHandler(controlplane.Options{Version: version, Dashboard: dashboardHandler}),
+		Addr: *address,
+		Handler: controlplane.NewHandler(controlplane.Options{
+			Version:   version,
+			Dashboard: dashboardHandler,
+			Metrics:   recorder.Handler(),
+		}),
 		ReadHeaderTimeout: 5 * time.Second,
 	}
 

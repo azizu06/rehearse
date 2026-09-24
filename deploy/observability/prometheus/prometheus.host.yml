@@ -1,0 +1,8 @@
+global:
+  scrape_interval: 15s
+
+scrape_configs:
+  - job_name: rehearse
+    static_configs:
+      # Host networking reaches Rehearse on its loopback default.
+      - targets: ["127.0.0.1:8484"]

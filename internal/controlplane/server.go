@@ -24,6 +24,8 @@ type Options struct {
 	Dashboard    http.Handler
 	ReportReader ReportReader
 	Redactor     redact.Redactor
+	// Metrics serves GET /metrics when set.
+	Metrics http.Handler
 }
 
 // NewHandler constructs the versioned API and dashboard handler.
@@ -70,6 +72,9 @@ func NewHandler(options Options) http.Handler {
 	mux.HandleFunc("GET /api/v1/", func(response http.ResponseWriter, _ *http.Request) {
 		writeJSON(response, http.StatusNotFound, map[string]string{"error": "not found"})
 	})
+	if options.Metrics != nil {
+		mux.Handle("GET /metrics", options.Metrics)
+	}
 	mux.Handle("GET /", options.Dashboard)
 
 	return mux

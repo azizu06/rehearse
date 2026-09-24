@@ -1,0 +1,22 @@
+# Linux override: run Prometheus and Grafana on the host network so Rehearse
+# can stay on its loopback default. Use with compose.yaml; see
+# docs/observability.md.
+services:
+  prometheus:
+    network_mode: host
+    ports: !reset []
+    extra_hosts: !reset []
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.retention.time=30d
+      - --web.listen-address=127.0.0.1:9090
+    volumes: !override
+      - ./prometheus/prometheus.host.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+
+  grafana:
+    network_mode: host
+    ports: !reset []
+    environment:
+      GF_SERVER_HTTP_ADDR: 127.0.0.1
+      REHEARSE_PROMETHEUS_URL: http://127.0.0.1:9090
