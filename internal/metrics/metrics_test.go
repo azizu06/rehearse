@@ -3,6 +3,8 @@ package metrics_test
 import (
 	"fmt"
 	"reflect"
+	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -18,31 +20,24 @@ func TestRecorderRegistersLowCardinalityDrillMetrics(t *testing.T) {
 	t.Parallel()
 
 	families := gather(t, metrics.New())
-	wantLabels := map[string][]string{
-		"rehearse_drill_runs_total":                     {"outcome"},
-		"rehearse_drill_stage_duration_seconds":         {"stage"},
-		"rehearse_drill_cleanup_failures_total":         nil,
-		"rehearse_drill_last_success_timestamp_seconds": nil,
+	want := map[string][]string{
+		"rehearse_drill_runs_total":                     {"outcome=cancelled", "outcome=failed", "outcome=succeeded", "outcome=timed_out"},
+		"rehearse_drill_stage_duration_seconds":         {"stage=acquire", "stage=boot", "stage=cleanup", "stage=preflight", "stage=probe", "stage=queued", "stage=report", "stage=restore"},
+		"rehearse_drill_cleanup_failures_total":         {""},
+		"rehearse_drill_last_success_timestamp_seconds": {""},
 	}
-	for name, labels := range wantLabels {
-		family, ok := families[name]
-		if !ok {
-			t.Fatalf("metric %s is not registered", name)
-		}
-		for _, metric := range family.GetMetric() {
-			if got := labelNames(metric); !equalStrings(got, labels) {
-				t.Fatalf("%s labels = %v, want %v", name, got, labels)
+	for name, wantSeries := range want {
+		var series []string
+		for _, metric := range families[name].GetMetric() {
+			var labels []string
+			for _, pair := range metric.GetLabel() {
+				labels = append(labels, pair.GetName()+"="+pair.GetValue())
 			}
+			series = append(series, strings.Join(labels, ","))
 		}
-	}
-
-	outcomes := labelValues(families["rehearse_drill_runs_total"], "outcome")
-	if want := []string{"cancelled", "failed", "succeeded", "timed_out"}; !equalStrings(outcomes, want) {
-		t.Fatalf("pre-initialized outcomes = %v, want %v", outcomes, want)
-	}
-	stages := labelValues(families["rehearse_drill_stage_duration_seconds"], "stage")
-	if want := []string{"acquire", "boot", "cleanup", "preflight", "probe", "queued", "report", "restore"}; !equalStrings(stages, want) {
-		t.Fatalf("pre-initialized stages = %v, want %v", stages, want)
+		if !slices.Equal(series, wantSeries) {
+			t.Fatalf("%s pre-initialized series = %v, want %v", name, series, wantSeries)
+		}
 	}
 }
 
@@ -232,36 +227,4 @@ func gather(t *testing.T, recorder *metrics.Recorder) map[string]*dto.MetricFami
 		families[family.GetName()] = family
 	}
 	return families
-}
-
-func labelNames(metric *dto.Metric) []string {
-	var names []string
-	for _, pair := range metric.GetLabel() {
-		names = append(names, pair.GetName())
-	}
-	return names
-}
-
-func labelValues(family *dto.MetricFamily, label string) []string {
-	var values []string
-	for _, metric := range family.GetMetric() {
-		for _, pair := range metric.GetLabel() {
-			if pair.GetName() == label {
-				values = append(values, pair.GetValue())
-			}
-		}
-	}
-	return values
-}
-
-func equalStrings(got, want []string) bool {
-	if len(got) != len(want) {
-		return false
-	}
-	for index := range got {
-		if got[index] != want[index] {
-			return false
-		}
-	}
-	return true
 }
