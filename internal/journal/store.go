@@ -52,7 +52,8 @@ type Store struct {
 // the prior projection (zero for a new run). Changes made by restart
 // reconciliation inside Open are not observed. Changes are delivered one at a
 // time in commit order. Implementations must return quickly and must not call
-// back into the Store.
+// back into the Store. The change is already durable when the observer runs,
+// so an observer panic propagates to a caller whose write has committed.
 type RunObserver interface {
 	ObserveRunChange(before, after drill.Run, event drill.Event)
 }

@@ -59,7 +59,8 @@ func TestGrafanaDashboardQueriesOnlyRegisteredMetrics(t *testing.T) {
 		if panel.Title == "" || panel.Description == "" || len(panel.Targets) == 0 {
 			t.Fatalf("panel %q needs a title, an explanatory description, and a query", panel.Title)
 		}
-		if !strings.Contains(string(datasources), "uid: "+panel.Datasource.UID) {
+		provisioned := regexp.MustCompile(`(?m)^\s*uid: ` + regexp.QuoteMeta(panel.Datasource.UID) + `\s*$`)
+		if panel.Datasource.UID == "" || !provisioned.Match(datasources) {
 			t.Fatalf("panel %q datasource uid %q is not provisioned", panel.Title, panel.Datasource.UID)
 		}
 		for _, target := range panel.Targets {

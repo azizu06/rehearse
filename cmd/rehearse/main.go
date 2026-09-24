@@ -22,12 +22,13 @@ func main() {
 		log.Fatalf("prepare dashboard: %v", err)
 	}
 
+	recorder := metrics.New()
 	server := &http.Server{
 		Addr: *address,
 		Handler: controlplane.NewHandler(controlplane.Options{
 			Version:   version,
 			Dashboard: dashboardHandler,
-			Metrics:   metrics.New().Handler(),
+			Metrics:   recorder.Handler(),
 		}),
 		ReadHeaderTimeout: 5 * time.Second,
 	}

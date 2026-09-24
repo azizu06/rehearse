@@ -64,7 +64,7 @@ func New() *Recorder {
 		stageDuration: prometheus.NewHistogramVec(prometheus.HistogramOpts{
 			Name:    "rehearse_drill_stage_duration_seconds",
 			Help:    "Time a drill run spent in each state-machine stage.",
-			Buckets: []float64{0.5, 1, 2.5, 5, 10, 30, 60, 120, 300, 600, 1800, 3600},
+			Buckets: []float64{0.5, 1, 2.5, 5, 10, 30, 60, 120, 300, 600, 1800, 3600, 7200, 14400},
 		}, []string{"stage"}),
 		cleanupFailures: prometheus.NewCounter(prometheus.CounterOpts{
 			Name: "rehearse_drill_cleanup_failures_total",

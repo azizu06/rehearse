@@ -31,29 +31,41 @@ retry event. Changes reach the recorder one at a time in commit order.
 
 ## Start the optional stack
 
-Run Rehearse natively, then start Prometheus and Grafana with Docker Compose:
+Run Rehearse natively, then start Prometheus and Grafana with Docker Compose.
+Compose refuses to start until `GRAFANA_ADMIN_PASSWORD` is set; choose your own
+value and keep it out of the repository:
 
 ```bash
 make build
 ./build/rehearse -addr 127.0.0.1:8484
+export GRAFANA_ADMIN_PASSWORD='choose-a-password'
 docker compose -f deploy/observability/compose.yaml up -d
 ```
 
 - Prometheus: <http://127.0.0.1:9090> scrapes `host.docker.internal:8484`
   every 15 seconds and keeps 30 days of data.
 - Grafana: <http://127.0.0.1:3000> opens the provisioned "Rehearse recovery
-  drills" dashboard for anonymous viewers. Sign in with Grafana's default
-  administrator account only if you want to edit it.
+  drills" dashboard for anonymous viewers. Sign in as `admin` with
+  `GRAFANA_ADMIN_PASSWORD` only to edit. Grafana applies that password when its
+  data volume is first created.
 
-Both ports bind to loopback. Stop the stack with
-`docker compose -f deploy/observability/compose.yaml down` and add `-v` to
+Both ports bind to loopback. Stop the stack from a shell that still has
+`GRAFANA_ADMIN_PASSWORD` set with
+`docker compose -f deploy/observability/compose.yaml down`, and add `-v` to
 delete its stored data.
 
 On Docker Desktop, containers reach a loopback-bound Rehearse through
-`host.docker.internal`. On Linux, `host.docker.internal` resolves to the Docker
-bridge gateway (commonly `172.17.0.1`), so start Rehearse on that address, for
-example `./build/rehearse -addr 172.17.0.1:8484`. Avoid `0.0.0.0`: the
-control plane is not authenticated yet.
+`host.docker.internal`. On Linux, keep Rehearse on `127.0.0.1` and add the
+host-network override, which runs Prometheus and Grafana on the host network,
+scrapes `127.0.0.1:8484`, and binds both to loopback:
+
+```bash
+docker compose -f deploy/observability/compose.yaml \
+  -f deploy/observability/compose.linux.yaml up -d
+```
+
+Do not bind Rehearse to `0.0.0.0` or a bridge address: the control plane is not
+authenticated yet.
 
 ## Dashboard panels
 

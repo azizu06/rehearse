@@ -5,6 +5,6 @@ datasources:
     uid: rehearse-prometheus
     type: prometheus
     access: proxy
-    url: http://prometheus:9090
+    url: ${REHEARSE_PROMETHEUS_URL}
     isDefault: true
     editable: false

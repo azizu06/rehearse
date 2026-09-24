@@ -1,7 +1,10 @@
 package metrics_test
 
 import (
+	"context"
+	"errors"
 	"fmt"
+	"path/filepath"
 	"reflect"
 	"slices"
 	"strings"
@@ -25,6 +28,21 @@ func TestRecorderRegistersLowCardinalityDrillMetrics(t *testing.T) {
 		"rehearse_drill_stage_duration_seconds":         {"stage=acquire", "stage=boot", "stage=cleanup", "stage=preflight", "stage=probe", "stage=queued", "stage=report", "stage=restore"},
 		"rehearse_drill_cleanup_failures_total":         {""},
 		"rehearse_drill_last_success_timestamp_seconds": {""},
+	}
+	// Drill metrics may only use the closed state-machine labels. The runtime
+	// collectors are allowed only go_info's constant Go version label.
+	for name, family := range families {
+		allowed := []string{"version"}
+		if strings.HasPrefix(name, "rehearse_") {
+			allowed = []string{"outcome", "stage"}
+		}
+		for _, metric := range family.GetMetric() {
+			for _, pair := range metric.GetLabel() {
+				if !slices.Contains(allowed, pair.GetName()) {
+					t.Fatalf("%s exports label %q, want one of %v", name, pair.GetName(), allowed)
+				}
+			}
+		}
 	}
 	for name, wantSeries := range want {
 		var series []string
@@ -190,6 +208,79 @@ func TestRecorderFollowsStateMachineChanges(t *testing.T) {
 				t.Fatalf("metrics = %v, want %v", got, test.want)
 			}
 		})
+	}
+}
+
+func TestJournalCommitsDriveRecorderAcrossRestart(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "rehearse.db")
+	recorder := metrics.New()
+	start := time.Date(2020, time.January, 1, 0, 0, 0, 0, time.UTC)
+	at := func(seconds int) time.Time { return start.Add(time.Duration(seconds) * time.Second) }
+
+	store, err := journal.Open(ctx, path, journal.WithRunObserver(recorder))
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	plan := drill.Plan{
+		ID: "plan-1", Name: "nightly drill", Version: 1, CreatedAt: start,
+		Spec: drill.PlanSpec{SourceKind: "backup-source", TargetKind: "restore-target"},
+	}
+	if err := store.CreatePlan(ctx, plan); err != nil {
+		t.Fatalf("CreatePlan: %v", err)
+	}
+	if _, err := store.CreateRun(ctx, "run-1", plan.ID, plan.Version, start); err != nil {
+		t.Fatalf("CreateRun: %v", err)
+	}
+	if _, err := store.Transition(ctx, "run-1", drill.StagePreflight, at(1)); err != nil {
+		t.Fatalf("Transition preflight: %v", err)
+	}
+	beforeRejected := snapshot(gather(t, recorder))
+	if _, err := store.Transition(ctx, "run-1", drill.StageBoot, at(2)); !errors.Is(err, drill.ErrInvalidTransition) {
+		t.Fatalf("skipping transition error = %v, want ErrInvalidTransition", err)
+	}
+	if got := snapshot(gather(t, recorder)); !reflect.DeepEqual(got, beforeRejected) {
+		t.Fatalf("rejected transition changed metrics: %v, want %v", got, beforeRejected)
+	}
+	if _, err := store.Transition(ctx, "run-1", drill.StageAcquire, at(3)); err != nil {
+		t.Fatalf("Transition acquire: %v", err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	// Reopening marks the in-flight run for reconciliation, so the acquire
+	// interval spans the restart and must not be measured.
+	reopened, err := journal.Open(ctx, path, journal.WithRunObserver(recorder))
+	if err != nil {
+		t.Fatalf("reopen: %v", err)
+	}
+	t.Cleanup(func() { _ = reopened.Close() })
+	run, err := reopened.Run(ctx, "run-1")
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	failedAt := run.UpdatedAt.Add(time.Second)
+	if _, err := reopened.RecordOutcome(ctx, "run-1", drill.OutcomeFailed, failedAt); err != nil {
+		t.Fatalf("RecordOutcome: %v", err)
+	}
+	if _, err := reopened.RecordCleanup(ctx, "run-1", drill.CleanupSucceeded, failedAt.Add(time.Second)); err != nil {
+		t.Fatalf("RecordCleanup: %v", err)
+	}
+
+	want := map[string]float64{
+		"runs{failed}":     1,
+		"count{queued}":    1,
+		"sum{queued}":      1,
+		"count{preflight}": 1,
+		"sum{preflight}":   2,
+		"count{cleanup}":   1,
+		"sum{cleanup}":     1,
+	}
+	if got := snapshot(gather(t, recorder)); !reflect.DeepEqual(got, want) {
+		t.Fatalf("metrics = %v, want %v", got, want)
 	}
 }
 
