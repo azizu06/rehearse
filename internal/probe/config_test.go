@@ -2,6 +2,7 @@ package probe_test
 
 import (
 	"errors"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -61,6 +62,77 @@ func TestCanonicalConfigRejectsOversizedProgrammaticDocument(t *testing.T) {
 			}
 			if encoded, err := config.CanonicalJSON(); !errors.Is(err, probe.ErrInvalidConfig) || encoded != nil {
 				t.Fatalf("CanonicalJSON() bytes = %d error = %v, want nil and ErrInvalidConfig", len(encoded), err)
+			}
+		})
+	}
+}
+
+func TestConfigIsZero(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name   string
+		config probe.Config
+		want   bool
+	}{
+		{name: "zero value", config: probe.Config{}, want: true},
+		{name: "schema version only", config: probe.Config{SchemaVersion: probe.SchemaVersion}, want: false},
+		{
+			name:   "probes only",
+			config: probe.Config{Probes: []probe.Spec{{Ordinal: 1, ID: "health", Kind: probe.KindHTTP}}},
+			want:   false,
+		},
+		{
+			name: "schema version and probes",
+			config: probe.Config{
+				SchemaVersion: probe.SchemaVersion,
+				Probes:        []probe.Spec{{Ordinal: 1, ID: "health", Kind: probe.KindHTTP}},
+			},
+			want: false,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			if got := test.config.IsZero(); got != test.want {
+				t.Fatalf("IsZero() = %v, want %v", got, test.want)
+			}
+		})
+	}
+}
+
+func TestParseConfigBytesMatchesParseConfig(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		json    string
+		wantErr bool
+	}{
+		{name: "valid document", json: validHTTPConfig(`"max_attempts":1`)},
+		{name: "invalid document", json: strings.Replace(validHTTPConfig(`"max_attempts":1`), `"required":true`, `"required":true,"surprise":1`, 1), wantErr: true},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			fromBytes, bytesErr := probe.ParseConfigBytes([]byte(test.json))
+			fromReader, readerErr := probe.ParseConfig(strings.NewReader(test.json))
+			if test.wantErr {
+				if !errors.Is(bytesErr, probe.ErrInvalidConfig) {
+					t.Fatalf("ParseConfigBytes error = %v, want ErrInvalidConfig", bytesErr)
+				}
+				return
+			}
+			if bytesErr != nil {
+				t.Fatalf("ParseConfigBytes error = %v, want nil", bytesErr)
+			}
+			if readerErr != nil {
+				t.Fatalf("ParseConfig error = %v, want nil", readerErr)
+			}
+			if !reflect.DeepEqual(fromBytes, fromReader) {
+				t.Fatalf("ParseConfigBytes() = %+v, want %+v", fromBytes, fromReader)
 			}
 		})
 	}
