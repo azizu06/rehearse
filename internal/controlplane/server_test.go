@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -107,6 +108,64 @@ func TestReportAPIReappliesRedaction(t *testing.T) {
 	}
 	if bytes.Contains(response.Body.Bytes(), []byte(secret)) || !bytes.Contains(response.Body.Bytes(), []byte(redact.Replacement)) {
 		t.Fatalf("API report redaction = %s", response.Body.String())
+	}
+}
+
+func TestReportAPIRejectsAndFailsClosed(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name       string
+		runID      string
+		reader     controlplane.ReportReader
+		wantStatus int
+	}{
+		{
+			name:       "no report reader configured",
+			runID:      "run-10",
+			reader:     nil,
+			wantStatus: http.StatusNotFound,
+		},
+		{
+			name:       "blank run ID",
+			runID:      "%20",
+			reader:     staticReportReader{},
+			wantStatus: http.StatusNotFound,
+		},
+		{
+			name:       "report not found",
+			runID:      "run-10",
+			reader:     staticReportReader{err: evidence.ErrReportNotFound},
+			wantStatus: http.StatusNotFound,
+		},
+		{
+			name:       "reader fails",
+			runID:      "run-10",
+			reader:     staticReportReader{err: errors.New("boom")},
+			wantStatus: http.StatusInternalServerError,
+		},
+		{
+			name:       "report fails canonicalization",
+			runID:      "run-10",
+			reader:     staticReportReader{view: evidence.ReportView{}},
+			wantStatus: http.StatusInternalServerError,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+
+			handler := controlplane.NewHandler(controlplane.Options{ReportReader: test.reader})
+			request := httptest.NewRequest(http.MethodGet, "/api/v1/runs/"+test.runID+"/report", nil)
+			response := httptest.NewRecorder()
+
+			handler.ServeHTTP(response, request)
+
+			if response.Code != test.wantStatus {
+				t.Fatalf("status = %d, want %d: %s", response.Code, test.wantStatus, response.Body.String())
+			}
+		})
 	}
 }
 
