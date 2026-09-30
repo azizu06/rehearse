@@ -2,10 +2,12 @@ package drill_test
 
 import (
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/azizu06/rehearse/internal/drill"
+	"github.com/azizu06/rehearse/internal/probe"
 )
 
 func TestPlanAcceptsCredentialReferencesWithoutSecretValues(t *testing.T) {
@@ -90,6 +92,21 @@ func TestPlanRejectsInvalidPersistedFields(t *testing.T) {
 				t.Fatalf("Validate error = %v, want ErrInvalidIdentity", err)
 			}
 		})
+	}
+}
+
+func TestPlanRejectsInvalidProbeConfig(t *testing.T) {
+	t.Parallel()
+
+	plan := validPlan()
+	plan.Spec.ProbeConfig = probe.Config{SchemaVersion: "rehearse.probes/v0"}
+
+	err := plan.Validate()
+	if !errors.Is(err, drill.ErrInvalidPlan) {
+		t.Fatalf("Validate error = %v, want ErrInvalidPlan", err)
+	}
+	if !strings.Contains(err.Error(), "probe config") {
+		t.Fatalf("Validate error = %v, want it to mention probe config", err)
 	}
 }
 
