@@ -116,6 +116,29 @@ func TestCanonicalReportPreservesContiguousSemanticOrder(t *testing.T) {
 	}
 }
 
+func TestValidateAcceptsFullStagePipelineInOrder(t *testing.T) {
+	t.Parallel()
+
+	stageNames := []drill.Stage{
+		drill.StageQueued, drill.StagePreflight, drill.StageAcquire, drill.StageRestore,
+		drill.StageBoot, drill.StageProbe, drill.StageReport, drill.StageCleanup,
+	}
+	report := validReport()
+	startedAt := report.Stages[0].StartedAt
+	stages := make([]evidence.Stage, len(stageNames))
+	for index, name := range stageNames {
+		stageStart := startedAt.Add(time.Duration(index) * time.Second)
+		stages[index] = evidence.Stage{
+			Ordinal: index + 1, Name: name,
+			StartedAt: stageStart, FinishedAt: stageStart.Add(time.Second), Duration: time.Second,
+		}
+	}
+	report.Stages = stages
+	if err := report.Validate(); err != nil {
+		t.Fatalf("Validate() error = %v, want nil for full stage pipeline in order", err)
+	}
+}
+
 func TestParseJSONAcceptsMaximumBoundedProbeEvidence(t *testing.T) {
 	t.Parallel()
 
