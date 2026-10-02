@@ -38,4 +38,22 @@ describe("App", () => {
       await screen.findByText("Unable to reach the local control plane"),
     ).toBeVisible();
   });
+
+  it("shows a useful status when the control plane responds with an error status", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(
+        new Response(JSON.stringify({ version: "test" }), {
+          status: 500,
+          headers: { "Content-Type": "application/json" },
+        }),
+      ),
+    );
+
+    render(<App />);
+
+    expect(
+      await screen.findByText("Unable to reach the local control plane"),
+    ).toBeVisible();
+  });
 });
