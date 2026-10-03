@@ -138,6 +138,58 @@ func TestParseConfigBytesMatchesParseConfig(t *testing.T) {
 	}
 }
 
+func TestValidateRejectsInvalidKindSpecificPayloads(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		spec    probe.Spec
+		wantErr bool
+	}{
+		{name: "valid tcp address", spec: tcpSpec("127.0.0.1:8080")},
+		{name: "tcp address missing port", spec: tcpSpec("127.0.0.1"), wantErr: true},
+		{name: "valid data payload", spec: dataSpec("file.bin", strings.Repeat("ab", 32))},
+		{name: "data path escapes sandbox", spec: dataSpec("../secret", strings.Repeat("ab", 32)), wantErr: true},
+		{name: "data path absolute", spec: dataSpec("/etc/passwd", strings.Repeat("ab", 32)), wantErr: true},
+		{name: "data sha256 not hex", spec: dataSpec("file.bin", "not-hex"), wantErr: true},
+		{name: "valid sql payload", spec: sqlSpec("db", "readonly", "SELECT 1", "1")},
+		{name: "sql connection id uppercase", spec: sqlSpec("DB", "readonly", "SELECT 1", "1"), wantErr: true},
+		{name: "sql expected role starts with digit", spec: sqlSpec("db", "1role", "SELECT 1", "1"), wantErr: true},
+		{name: "sql query blank", spec: sqlSpec("db", "readonly", "   ", "1"), wantErr: true},
+		{name: "unsupported kind", spec: probe.Spec{Ordinal: 1, ID: "probe", Kind: probe.Kind("bogus"), Retry: validRetry}, wantErr: true},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			config := probe.Config{SchemaVersion: probe.SchemaVersion, Probes: []probe.Spec{test.spec}}
+			err := config.Validate()
+			if test.wantErr && !errors.Is(err, probe.ErrInvalidConfig) {
+				t.Fatalf("Validate() error = %v, want ErrInvalidConfig", err)
+			}
+			if !test.wantErr && err != nil {
+				t.Fatalf("Validate() error = %v, want nil", err)
+			}
+		})
+	}
+}
+
+var validRetry = probe.RetryPolicy{Deadline: time.Second, Backoff: 10 * time.Millisecond, MaxAttempts: 1}
+
+func tcpSpec(address string) probe.Spec {
+	return probe.Spec{Ordinal: 1, ID: "probe", Kind: probe.KindTCP, Retry: validRetry, TCP: &probe.TCPSpec{Address: address}}
+}
+
+func dataSpec(path, sha256 string) probe.Spec {
+	return probe.Spec{Ordinal: 1, ID: "probe", Kind: probe.KindData, Retry: validRetry, Data: &probe.DataSpec{Path: path, SHA256: sha256}}
+}
+
+func sqlSpec(connectionID, expectedRole, query, expectedValue string) probe.Spec {
+	return probe.Spec{Ordinal: 1, ID: "probe", Kind: probe.KindSQL, Retry: validRetry, SQL: &probe.SQLSpec{
+		ConnectionID: connectionID, ExpectedRole: expectedRole, Query: query, ExpectedValue: expectedValue,
+	}}
+}
+
 func FuzzParseConfigNeverPanicsOrBypassesBounds(f *testing.F) {
 	f.Add([]byte(validHTTPConfig(`"max_attempts":1`)))
 	f.Add([]byte(`{"schema_version":"rehearse.probes/v1","probes":[]}`))
