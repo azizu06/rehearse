@@ -8,6 +8,14 @@ describe("App", () => {
     vi.unstubAllGlobals();
   });
 
+  it("shows a connecting status before the version request resolves", () => {
+    vi.stubGlobal("fetch", vi.fn().mockReturnValue(new Promise(() => {})));
+
+    render(<App />);
+
+    expect(screen.getByText("Connecting to the local control plane")).toBeVisible();
+  });
+
   it("shows the control-plane version after connecting", async () => {
     vi.stubGlobal(
       "fetch",
