@@ -17,14 +17,47 @@ func TestHandlerServesEmbeddedDashboard(t *testing.T) {
 		t.Fatalf("create dashboard handler: %v", err)
 	}
 
-	request := httptest.NewRequest(http.MethodGet, "/", nil)
-	response := httptest.NewRecorder()
-	handler.ServeHTTP(response, request)
-
-	if response.Code != http.StatusOK {
-		t.Fatalf("status = %d, want %d", response.Code, http.StatusOK)
+	tests := []struct {
+		name       string
+		path       string
+		wantStatus int
+		wantBody   string
+	}{
+		{
+			name:       "root entrypoint",
+			path:       "/",
+			wantStatus: http.StatusOK,
+			wantBody:   `<div id="root"></div>`,
+		},
+		{
+			name:       "embedded static asset",
+			path:       "/assets/index.css",
+			wantStatus: http.StatusOK,
+			wantBody:   ":root{color:#17242b",
+		},
+		{
+			name:       "path not in the embedded bundle",
+			path:       "/assets/missing.js",
+			wantStatus: http.StatusNotFound,
+		},
 	}
-	if body := response.Body.String(); !strings.Contains(body, `<div id="root"></div>`) {
-		t.Fatalf("body does not contain dashboard root: %q", body)
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			request := httptest.NewRequest(http.MethodGet, tt.path, nil)
+			response := httptest.NewRecorder()
+			handler.ServeHTTP(response, request)
+
+			if response.Code != tt.wantStatus {
+				t.Fatalf("status = %d, want %d", response.Code, tt.wantStatus)
+			}
+			if tt.wantBody != "" {
+				if body := response.Body.String(); !strings.Contains(body, tt.wantBody) {
+					t.Fatalf("body does not contain %q: %q", tt.wantBody, body)
+				}
+			}
+		})
 	}
 }
