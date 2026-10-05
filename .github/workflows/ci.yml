@@ -123,7 +123,7 @@ jobs:
           go test ./internal/source/restic -run '^$' -fuzz '^FuzzValidateStructuredExit$' -fuzztime=5s -parallel=4
       - name: Surface restic fuzz failures
         if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: restic-fuzz-failures
           path: internal/source/restic/testdata/fuzz
