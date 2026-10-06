@@ -52,6 +52,38 @@ func TestBoundedStringDoesNotExposeMarkerPrefixAfterEarlierRedactions(t *testing
 	}
 }
 
+func TestBoundedStringTrimsPartialMarkerAtTruncationBoundary(t *testing.T) {
+	t.Parallel()
+
+	marker := "secret"
+	tests := []struct {
+		name  string
+		value string
+		limit int
+		want  string
+	}{
+		{name: "multi-byte overlap trimmed", value: "aaasecretbbb", limit: 6, want: "aaa"},
+		{name: "single-byte overlap trimmed", value: "zzzsqqqqqqqqqq", limit: 4, want: "zzz"},
+		{name: "no overlap kept in full", value: "aaaaaaaaaaaa", limit: 6, want: "aaaaaa"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+
+			got, truncated := redact.New(marker).BoundedString(test.value, test.limit)
+			if got != test.want {
+				t.Fatalf("BoundedString(%q, %d) = %q, want %q", test.value, test.limit, got, test.want)
+			}
+			if !truncated {
+				t.Fatalf("BoundedString(%q, %d) truncated = false, want true", test.value, test.limit)
+			}
+			if strings.Contains(got, marker[:1]) {
+				t.Fatalf("BoundedString(%q, %d) = %q leaks marker fragment", test.value, test.limit, got)
+			}
+		})
+	}
+}
+
 func TestRedactionIsIdempotentWhenMarkersOverlapReplacement(t *testing.T) {
 	t.Parallel()
 
