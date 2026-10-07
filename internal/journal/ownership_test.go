@@ -50,6 +50,15 @@ func TestCanonicalJournalPathAcceptsSingleLinkedJournal(t *testing.T) {
 	}
 }
 
+func TestCanonicalJournalPathRejectsMissingParentDirectory(t *testing.T) {
+	dir := t.TempDir()
+	missing := filepath.Join(dir, "no-such-dir", "rehearse.db")
+
+	if _, err := canonicalJournalPath(missing); err == nil {
+		t.Fatalf("canonicalJournalPath(%q) error = nil, want parent resolution failure", missing)
+	}
+}
+
 func TestRejectHardLinkedJournalRequiresExistingPath(t *testing.T) {
 	dir := t.TempDir()
 	missing := filepath.Join(dir, "missing.db")
