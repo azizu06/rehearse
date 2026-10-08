@@ -170,3 +170,44 @@ func TestComposeSafetyAcceptsProjectScopedSingleReplicaModel(t *testing.T) {
 		t.Fatalf("compose args = %q, want empty environment file", args)
 	}
 }
+
+func TestStringMapEqual(t *testing.T) {
+	tests := []struct {
+		name     string
+		actual   map[string]string
+		expected map[string]string
+		want     bool
+	}{
+		{name: "equal", actual: map[string]string{"a": "1", "b": "2"}, expected: map[string]string{"a": "1", "b": "2"}, want: true},
+		{name: "different lengths", actual: map[string]string{"a": "1"}, expected: map[string]string{"a": "1", "b": "2"}, want: false},
+		{name: "same length different values", actual: map[string]string{"a": "1", "b": "9"}, expected: map[string]string{"a": "1", "b": "2"}, want: false},
+		{name: "both empty", actual: map[string]string{}, expected: map[string]string{}, want: true},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := stringMapEqual(test.actual, test.expected); got != test.want {
+				t.Fatalf("stringMapEqual(%v, %v) = %v, want %v", test.actual, test.expected, got, test.want)
+			}
+		})
+	}
+}
+
+func TestRawFloatEqual(t *testing.T) {
+	tests := []struct {
+		name     string
+		data     json.RawMessage
+		expected string
+		want     bool
+	}{
+		{name: "equal quoted values", data: json.RawMessage(`"0.5"`), expected: "0.5", want: true},
+		{name: "mismatched values", data: json.RawMessage(`"0.5"`), expected: "1.0", want: false},
+		{name: "unparsable data", data: json.RawMessage(`"not-a-number"`), expected: "0.5", want: false},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := rawFloatEqual(test.data, test.expected); got != test.want {
+				t.Fatalf("rawFloatEqual(%s, %q) = %v, want %v", test.data, test.expected, got, test.want)
+			}
+		})
+	}
+}
