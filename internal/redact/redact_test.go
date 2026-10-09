@@ -7,6 +7,37 @@ import (
 	"github.com/azizu06/rehearse/internal/redact"
 )
 
+func TestStringReturnsValueUnchangedWithNoMarkers(t *testing.T) {
+	t.Parallel()
+
+	if got, want := redact.New().String("no secrets here"), "no secrets here"; got != want {
+		t.Fatalf("String(%q) = %q, want %q", "no secrets here", got, want)
+	}
+}
+
+func TestStringAvoidsSentinelCollisionWithNullByteInValue(t *testing.T) {
+	t.Parallel()
+
+	value := "pre\x00fix secret end"
+	got := redact.New("secret").String(value)
+	want := "pre\x00fix [REDACTED] end"
+	if got != want {
+		t.Fatalf("String(%q) = %q, want %q", value, got, want)
+	}
+}
+
+func TestBoundedStringKeepsValueWhenCutAlignsWithReplacementBoundary(t *testing.T) {
+	t.Parallel()
+
+	got, truncated := redact.New("x").BoundedString("xx", len(redact.Replacement))
+	if got != redact.Replacement {
+		t.Fatalf("BoundedString() = %q, want %q", got, redact.Replacement)
+	}
+	if !truncated {
+		t.Fatal("BoundedString() truncated = false, want true")
+	}
+}
+
 func TestEqualLengthOverlappingMarkersUseStableOrder(t *testing.T) {
 	t.Parallel()
 
