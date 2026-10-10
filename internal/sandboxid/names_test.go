@@ -48,6 +48,17 @@ func TestProject(t *testing.T) {
 	}
 }
 
+func TestProjectFromDigestRejectsInvalidRunID(t *testing.T) {
+	digest := sha256.Sum256([]byte("run id"))
+	projectName, fingerprint, err := ProjectFromDigest("run id", digest)
+	if !errors.Is(err, ErrInvalidRunID) {
+		t.Fatalf("ProjectFromDigest(%q) error = %v, want %v", "run id", err, ErrInvalidRunID)
+	}
+	if projectName != "" || fingerprint != "" {
+		t.Errorf("ProjectFromDigest(%q) = (%q, %q), want empty strings on error", "run id", projectName, fingerprint)
+	}
+}
+
 func TestValidResourceKey(t *testing.T) {
 	tests := []struct {
 		name string
@@ -136,6 +147,7 @@ func TestValidateResourceName(t *testing.T) {
 		{name: "valid network", runID: runID, kind: "network", resName: networkName},
 		{name: "wrong project prefix", runID: "other-run", kind: "container", resName: containerName, wantErr: true},
 		{name: "missing suffix", runID: runID, kind: "container", resName: projectName + "-app", wantErr: true},
+		{name: "wrong project prefix for network", runID: "other-run", kind: "network", resName: networkName, wantErr: true},
 		{name: "unknown kind", runID: runID, kind: "volume-typo", resName: containerName, wantErr: true},
 		{name: "invalid run ID", runID: "bad id", kind: "container", resName: containerName, wantErr: true},
 		{name: "tampered key", runID: runID, kind: "container", resName: projectName + "-Bad_Key-1", wantErr: true},
