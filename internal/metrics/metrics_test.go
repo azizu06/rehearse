@@ -284,6 +284,60 @@ func TestJournalCommitsDriveRecorderAcrossRestart(t *testing.T) {
 	}
 }
 
+func TestRecorderKeepsLatestSuccessTimestamp(t *testing.T) {
+	t.Parallel()
+
+	start := time.Date(2026, time.September, 24, 12, 0, 0, 0, time.UTC)
+	recorder := metrics.New()
+
+	runToReport := func(id string, at time.Time) drill.Run {
+		run, created, err := drill.NewRun(id, "plan-1", 1, at)
+		if err != nil {
+			t.Fatalf("NewRun: %v", err)
+		}
+		recorder.ObserveRunChange(drill.Run{}, run, created)
+		for _, stage := range []drill.Stage{
+			drill.StagePreflight, drill.StageAcquire, drill.StageRestore,
+			drill.StageBoot, drill.StageProbe, drill.StageReport,
+		} {
+			before := run
+			event, err := run.Transition(stage, at)
+			if err != nil {
+				t.Fatalf("Transition %s: %v", stage, err)
+			}
+			recorder.ObserveRunChange(before, run, event)
+		}
+		return run
+	}
+	succeed := func(run drill.Run, at time.Time) {
+		before := run
+		event, err := run.RecordOutcome(drill.OutcomeSucceeded, at)
+		if err != nil {
+			t.Fatalf("RecordOutcome: %v", err)
+		}
+		recorder.ObserveRunChange(before, run, event)
+	}
+
+	laterRun := runToReport("run-later", start)
+	succeed(laterRun, start.Add(100*time.Second))
+	if got := lastSuccess(gather(t, recorder)); got != float64(start.Add(100*time.Second).Unix()) {
+		t.Fatalf("last_success = %v, want %v", got, start.Add(100*time.Second).Unix())
+	}
+
+	// A second run whose success is observed out of order, with an earlier
+	// timestamp than the one already recorded, must not move the gauge
+	// backwards.
+	earlierRun := runToReport("run-earlier", start.Add(-200*time.Second))
+	succeed(earlierRun, start.Add(50*time.Second))
+	if got := lastSuccess(gather(t, recorder)); got != float64(start.Add(100*time.Second).Unix()) {
+		t.Fatalf("last_success after earlier success = %v, want unchanged %v", got, start.Add(100*time.Second).Unix())
+	}
+}
+
+func lastSuccess(families map[string]*dto.MetricFamily) float64 {
+	return families["rehearse_drill_last_success_timestamp_seconds"].GetMetric()[0].GetGauge().GetValue()
+}
+
 type step func(*drill.Run) (drill.Event, error)
 
 // snapshot flattens the non-zero drill series into comparable keys.
