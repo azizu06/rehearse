@@ -97,6 +97,7 @@ func TestExecutionSnapshotRejectsNonGeneratedResourceFields(t *testing.T) {
 		{name: "positive CPU quota", field: "cpu_quota", value: 50000},
 		{name: "zero CPU quota", field: "cpu_quota", value: 0},
 		{name: "zero swap policy", field: "memswap_limit", value: 0},
+		{name: "non-numeric CPU limit", field: "cpus", value: "not-a-number"},
 	} {
 		t.Run(mutation.name, func(t *testing.T) {
 			service[mutation.field] = mutation.value
