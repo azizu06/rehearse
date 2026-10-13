@@ -48,6 +48,46 @@ func TestProject(t *testing.T) {
 	}
 }
 
+func TestProjectFromDigest(t *testing.T) {
+	digest := sha256.Sum256([]byte("precomputed-digest-input"))
+	wantFingerprint := fmt.Sprintf("%x", digest)
+	wantProject := ProjectPrefix + wantFingerprint[:ProjectDigestLength]
+
+	tests := []struct {
+		name    string
+		runID   string
+		wantErr error
+	}{
+		{name: "valid run ID uses the given digest as-is", runID: "durable-run"},
+		{name: "empty run ID rejected", runID: "", wantErr: ErrInvalidRunID},
+		{name: "space in run ID rejected", runID: "run id", wantErr: ErrInvalidRunID},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			projectName, fingerprint, err := ProjectFromDigest(tt.runID, digest)
+			if tt.wantErr != nil {
+				if !errors.Is(err, tt.wantErr) {
+					t.Fatalf("ProjectFromDigest(%q) error = %v, want %v", tt.runID, err, tt.wantErr)
+				}
+				if projectName != "" || fingerprint != "" {
+					t.Fatalf("ProjectFromDigest(%q) = (%q, %q), want empty results on error", tt.runID, projectName, fingerprint)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("ProjectFromDigest(%q) unexpected error: %v", tt.runID, err)
+			}
+			if fingerprint != wantFingerprint {
+				t.Errorf("fingerprint = %q, want %q", fingerprint, wantFingerprint)
+			}
+			if projectName != wantProject {
+				t.Errorf("projectName = %q, want %q", projectName, wantProject)
+			}
+		})
+	}
+}
+
 func TestValidResourceKey(t *testing.T) {
 	tests := []struct {
 		name string
