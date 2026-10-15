@@ -48,6 +48,15 @@ func TestProject(t *testing.T) {
 	}
 }
 
+func TestProjectFromDigestRejectsInvalidRunID(t *testing.T) {
+	digest := sha256.Sum256([]byte("durable-run"))
+
+	_, _, err := ProjectFromDigest("bad id", digest)
+	if !errors.Is(err, ErrInvalidRunID) {
+		t.Fatalf("ProjectFromDigest error = %v, want %v", err, ErrInvalidRunID)
+	}
+}
+
 func TestValidResourceKey(t *testing.T) {
 	tests := []struct {
 		name string
