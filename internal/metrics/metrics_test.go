@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"path/filepath"
 	"reflect"
 	"slices"
@@ -281,6 +283,23 @@ func TestJournalCommitsDriveRecorderAcrossRestart(t *testing.T) {
 	}
 	if got := snapshot(gather(t, recorder)); !reflect.DeepEqual(got, want) {
 		t.Fatalf("metrics = %v, want %v", got, want)
+	}
+}
+
+func TestRecorderHandlerServesPrometheusExposition(t *testing.T) {
+	t.Parallel()
+
+	recorder := metrics.New()
+	request := httptest.NewRequest(http.MethodGet, "/metrics", nil)
+	response := httptest.NewRecorder()
+
+	recorder.Handler().ServeHTTP(response, request)
+
+	if got := response.Code; got != http.StatusOK {
+		t.Fatalf("status = %d, want %d", got, http.StatusOK)
+	}
+	if body := response.Body.String(); !strings.Contains(body, "rehearse_drill_runs_total") {
+		t.Fatalf("body missing rehearse_drill_runs_total series: %s", body)
 	}
 }
 
