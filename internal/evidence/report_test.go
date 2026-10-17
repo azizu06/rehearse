@@ -44,6 +44,30 @@ func TestReportRejectsSuccessfulOutcomeWithRequiredProbeFailure(t *testing.T) {
 	}
 }
 
+func TestReportRejectsUnsupportedEnumValues(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name   string
+		mutate func(*evidence.Report)
+	}{
+		{name: "unsupported outcome", mutate: func(report *evidence.Report) { report.Outcome = "unknown" }},
+		{name: "unsupported stage name", mutate: func(report *evidence.Report) { report.Stages[0].Name = "unknown" }},
+		{name: "unsupported probe kind", mutate: func(report *evidence.Report) { report.Probes[0].Kind = "unknown" }},
+		{name: "unsupported probe status", mutate: func(report *evidence.Report) { report.Probes[0].Status = "unknown" }},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			report := validReport()
+			test.mutate(&report)
+			if err := report.Validate(); !errors.Is(err, evidence.ErrInvalidReport) {
+				t.Fatalf("Validate() error = %v, want ErrInvalidReport", err)
+			}
+		})
+	}
+}
+
 func TestReportRejectsInvalidIdentity(t *testing.T) {
 	t.Parallel()
 
