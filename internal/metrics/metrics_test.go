@@ -211,6 +211,54 @@ func TestRecorderFollowsStateMachineChanges(t *testing.T) {
 	}
 }
 
+func TestRecorderIgnoresOutOfOrderSuccessTimestamps(t *testing.T) {
+	t.Parallel()
+
+	start := time.Date(2026, time.September, 24, 12, 0, 0, 0, time.UTC)
+	at := func(seconds int) time.Time { return start.Add(time.Duration(seconds) * time.Second) }
+	recorder := metrics.New()
+
+	succeedAt := func(id string, successAt time.Time) {
+		run, created, err := drill.NewRun(id, "plan-1", 1, start)
+		if err != nil {
+			t.Fatalf("NewRun: %v", err)
+		}
+		recorder.ObserveRunChange(drill.Run{}, run, created)
+		for _, stage := range []drill.Stage{
+			drill.StagePreflight, drill.StageAcquire, drill.StageRestore,
+			drill.StageBoot, drill.StageProbe, drill.StageReport,
+		} {
+			before := run
+			event, err := run.Transition(stage, at(1))
+			if err != nil {
+				t.Fatalf("Transition %s: %v", stage, err)
+			}
+			recorder.ObserveRunChange(before, run, event)
+		}
+		before := run
+		event, err := run.RecordOutcome(drill.OutcomeSucceeded, successAt)
+		if err != nil {
+			t.Fatalf("RecordOutcome: %v", err)
+		}
+		recorder.ObserveRunChange(before, run, event)
+	}
+
+	// The second run's success is recorded later in wall-clock terms but
+	// carries an earlier drill timestamp, which must not move the gauge
+	// backwards.
+	later := at(100)
+	earlier := at(50)
+	succeedAt("run-1", later)
+	succeedAt("run-2", earlier)
+
+	families := gather(t, recorder)
+	got := families["rehearse_drill_last_success_timestamp_seconds"].GetMetric()[0].GetGauge().GetValue()
+	want := float64(later.UnixNano()) / float64(time.Second)
+	if got != want {
+		t.Fatalf("last_success = %v, want %v (an earlier success must not regress it)", got, want)
+	}
+}
+
 func TestJournalCommitsDriveRecorderAcrossRestart(t *testing.T) {
 	t.Parallel()
 
