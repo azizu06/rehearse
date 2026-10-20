@@ -72,6 +72,37 @@ func TestRequestValidationRejectsInvalidBounds(t *testing.T) {
 	}
 }
 
+func TestGenerateOwnershipIDsProduceDistinctValidHighEntropyIdentifiers(t *testing.T) {
+	generators := []struct {
+		name     string
+		generate func() (string, error)
+	}{
+		{name: "claim ID", generate: generateClaimID},
+		{name: "resource generation ID", generate: generateResourceGenerationID},
+	}
+	for _, generator := range generators {
+		t.Run(generator.name, func(t *testing.T) {
+			first, err := generator.generate()
+			if err != nil {
+				t.Fatalf("generate: %v", err)
+			}
+			if len(first) != sandboxClaimBytes*2 {
+				t.Fatalf("length = %d, want %d", len(first), sandboxClaimBytes*2)
+			}
+			if !validOwnershipID(first) {
+				t.Fatalf("validOwnershipID(%q) = false, want true", first)
+			}
+			second, err := generator.generate()
+			if err != nil {
+				t.Fatalf("generate: %v", err)
+			}
+			if first == second {
+				t.Fatalf("two generated IDs matched: %q", first)
+			}
+		})
+	}
+}
+
 func TestRequestValidationAcceptsMinimumCPUQuota(t *testing.T) {
 	request := Request{
 		RunID:        "run-minimum-cpu",
