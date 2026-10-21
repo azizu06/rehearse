@@ -211,6 +211,25 @@ func TestRecorderFollowsStateMachineChanges(t *testing.T) {
 	}
 }
 
+func TestObserveRunChangeSkipsStageEndBeforeProjectionTime(t *testing.T) {
+	t.Parallel()
+
+	recorder := metrics.New()
+	updatedAt := time.Date(2026, time.September, 24, 12, 0, 10, 0, time.UTC)
+	before := drill.Run{ID: "run-1", Stage: drill.StagePreflight, UpdatedAt: updatedAt}
+	event := drill.Event{Kind: drill.EventStageStarted, OccurredAt: updatedAt.Add(-time.Second)}
+
+	// A stage-end event that occurs before the projection's UpdatedAt can only
+	// arise from clock skew between processes; observeStageEnd must drop it
+	// rather than record a negative duration.
+	recorder.ObserveRunChange(before, drill.Run{}, event)
+
+	got := snapshot(gather(t, recorder))
+	if _, ok := got["count{preflight}"]; ok {
+		t.Fatalf("metrics = %v, want no preflight sample for an event preceding the projection", got)
+	}
+}
+
 func TestJournalCommitsDriveRecorderAcrossRestart(t *testing.T) {
 	t.Parallel()
 
