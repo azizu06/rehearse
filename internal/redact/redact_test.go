@@ -84,6 +84,43 @@ func TestBoundedStringTrimsPartialMarkerAtTruncationBoundary(t *testing.T) {
 	}
 }
 
+func TestStringWithNoMarkersReturnsValueUnchanged(t *testing.T) {
+	t.Parallel()
+
+	if got, want := redact.New().String("hello world"), "hello world"; got != want {
+		t.Fatalf("String() = %q, want %q", got, want)
+	}
+}
+
+func TestBoundedStringKeepsFullReplacementWhenTruncationBoundaryIsNotPartial(t *testing.T) {
+	t.Parallel()
+
+	// "ab" expands to the full "[REDACTED]" (10 bytes) at exactly the 10-byte
+	// limit, so the post-replacement truncation boundary lands clean: no
+	// suffix of the result is a partial prefix of Replacement, exercising the
+	// trimReplacementPrefix fallback that returns the value unchanged.
+	marker := "ab"
+	value := marker + strings.Repeat("c", 8)
+	got, truncated := redact.New(marker).BoundedString(value, len(redact.Replacement))
+	if got != redact.Replacement {
+		t.Fatalf("BoundedString(%q, %d) = %q, want %q", value, len(redact.Replacement), got, redact.Replacement)
+	}
+	if !truncated {
+		t.Fatalf("BoundedString(%q, %d) truncated = false, want true", value, len(redact.Replacement))
+	}
+}
+
+func TestSentinelExtendsWhenValueAlreadyContainsNulByte(t *testing.T) {
+	t.Parallel()
+
+	value := "secret\x00data"
+	got := redact.New("secret").String(value)
+	want := redact.Replacement + "\x00data"
+	if got != want {
+		t.Fatalf("String(%q) = %q, want %q", value, got, want)
+	}
+}
+
 func TestRedactionIsIdempotentWhenMarkersOverlapReplacement(t *testing.T) {
 	t.Parallel()
 
