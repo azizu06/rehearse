@@ -48,6 +48,42 @@ func TestProject(t *testing.T) {
 	}
 }
 
+func TestProjectFromDigest(t *testing.T) {
+	tests := []struct {
+		name    string
+		runID   string
+		wantErr error
+	}{
+		{name: "simple", runID: "durable-run"},
+		{name: "empty rejected", runID: "", wantErr: ErrInvalidRunID},
+		{name: "slash rejected", runID: "run/id", wantErr: ErrInvalidRunID},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			digest := sha256.Sum256([]byte(tt.runID))
+			projectName, fingerprint, err := ProjectFromDigest(tt.runID, digest)
+			if tt.wantErr != nil {
+				if !errors.Is(err, tt.wantErr) {
+					t.Fatalf("ProjectFromDigest(%q) error = %v, want %v", tt.runID, err, tt.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("ProjectFromDigest(%q) unexpected error: %v", tt.runID, err)
+			}
+			wantFingerprint := fmt.Sprintf("%x", digest)
+			if fingerprint != wantFingerprint {
+				t.Errorf("fingerprint = %q, want %q", fingerprint, wantFingerprint)
+			}
+			wantProject := ProjectPrefix + wantFingerprint[:ProjectDigestLength]
+			if projectName != wantProject {
+				t.Errorf("projectName = %q, want %q", projectName, wantProject)
+			}
+		})
+	}
+}
+
 func TestValidResourceKey(t *testing.T) {
 	tests := []struct {
 		name string
@@ -135,6 +171,7 @@ func TestValidateResourceName(t *testing.T) {
 		{name: "valid container", runID: runID, kind: "container", resName: containerName},
 		{name: "valid network", runID: runID, kind: "network", resName: networkName},
 		{name: "wrong project prefix", runID: "other-run", kind: "container", resName: containerName, wantErr: true},
+		{name: "wrong project prefix network", runID: "other-run", kind: "network", resName: networkName, wantErr: true},
 		{name: "missing suffix", runID: runID, kind: "container", resName: projectName + "-app", wantErr: true},
 		{name: "unknown kind", runID: runID, kind: "volume-typo", resName: containerName, wantErr: true},
 		{name: "invalid run ID", runID: "bad id", kind: "container", resName: containerName, wantErr: true},
