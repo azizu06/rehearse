@@ -39,6 +39,30 @@ func TestIdentityRequiresAndAppliesHighEntropySandboxClaim(t *testing.T) {
 	}
 }
 
+func TestResourceLabelsValidatesGenerationAndMergesIdentityLabels(t *testing.T) {
+	identity, err := newIdentity("run-labels")
+	if err != nil {
+		t.Fatalf("newIdentity: %v", err)
+	}
+
+	labels, err := resourceLabels(identity, testResourceGeneration)
+	if err != nil {
+		t.Fatalf("resourceLabels: %v", err)
+	}
+	if got := labels[resourceGenerationLabel]; got != testResourceGeneration {
+		t.Fatalf("resource generation label = %q, want %q", got, testResourceGeneration)
+	}
+	if got := labels[runFingerprintLabel]; got != identity.fingerprint {
+		t.Fatalf("fingerprint label = %q, want %q", got, identity.fingerprint)
+	}
+
+	for _, invalid := range []string{"", "abc", strings.Repeat("A", 64), strings.Repeat("g", 64)} {
+		if _, err := resourceLabels(identity, invalid); !errors.Is(err, ErrInvalidRequest) {
+			t.Fatalf("resourceLabels(%q) error = %v, want ErrInvalidRequest", invalid, err)
+		}
+	}
+}
+
 func TestRequestValidationRejectsInvalidBounds(t *testing.T) {
 	valid := Request{
 		RunID:        "run-1",
