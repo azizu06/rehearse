@@ -211,6 +211,30 @@ func TestRecorderFollowsStateMachineChanges(t *testing.T) {
 	}
 }
 
+func TestObserveStageEndSkipsNegativeElapsedInterval(t *testing.T) {
+	t.Parallel()
+
+	recorder := metrics.New()
+	before := drill.Run{
+		ID:        "run-1",
+		Stage:     drill.StageAcquire,
+		UpdatedAt: time.Date(2026, time.September, 24, 12, 0, 10, 0, time.UTC),
+	}
+	after := before
+	after.Outcome = drill.OutcomeFailed
+	event := drill.Event{
+		Kind:       drill.EventRunFailed,
+		Outcome:    drill.OutcomeFailed,
+		OccurredAt: before.UpdatedAt.Add(-time.Second),
+	}
+	recorder.ObserveRunChange(before, after, event)
+
+	want := map[string]float64{"runs{failed}": 1}
+	if got := snapshot(gather(t, recorder)); !reflect.DeepEqual(got, want) {
+		t.Fatalf("metrics = %v, want %v", got, want)
+	}
+}
+
 func TestJournalCommitsDriveRecorderAcrossRestart(t *testing.T) {
 	t.Parallel()
 
