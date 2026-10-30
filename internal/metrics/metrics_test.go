@@ -211,6 +211,25 @@ func TestRecorderFollowsStateMachineChanges(t *testing.T) {
 	}
 }
 
+func TestRecorderSkipsStageDurationWhenEventPrecedesStageStart(t *testing.T) {
+	t.Parallel()
+
+	start := time.Date(2026, time.September, 24, 12, 0, 0, 0, time.UTC)
+	before := drill.Run{
+		ID:        "run-1",
+		Stage:     drill.StagePreflight,
+		UpdatedAt: start,
+	}
+	event := drill.Event{Kind: drill.EventStageStarted, OccurredAt: start.Add(-time.Second)}
+
+	recorder := metrics.New()
+	recorder.ObserveRunChange(before, before, event)
+
+	if got := snapshot(gather(t, recorder)); len(got) != 0 {
+		t.Fatalf("metrics = %v, want none observed for an event preceding the stage start", got)
+	}
+}
+
 func TestJournalCommitsDriveRecorderAcrossRestart(t *testing.T) {
 	t.Parallel()
 
