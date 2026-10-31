@@ -17,6 +17,16 @@ func TestEqualLengthOverlappingMarkersUseStableOrder(t *testing.T) {
 	}
 }
 
+func TestStringKeepsLiteralNULByteWhenSentinelWouldCollide(t *testing.T) {
+	t.Parallel()
+
+	got := redact.New("secret").String("a\x00b secret")
+	want := "a\x00b " + redact.Replacement
+	if got != want {
+		t.Fatalf("String(%q) = %q, want %q", "a\x00b secret", got, want)
+	}
+}
+
 func TestMaxMarkerBytes(t *testing.T) {
 	t.Parallel()
 
