@@ -2,6 +2,37 @@
 
 **Prove a backup can become a working application before an incident does.**
 
+Rehearse is a Go tool that tests disaster recovery: it pulls a real backup, boots the app in an isolated Docker sandbox, checks that it works, and saves a report as proof.
+
+<!--
+TODO(Aziz): record a demo and put it here. Suggested: a 20-30 second GIF of
+`./build/rehearse` starting, the dashboard at http://127.0.0.1:8484 loading,
+and `make test` passing in a second terminal. Save it as
+docs/assets/rehearse-demo.gif, then replace this comment with:
+
+<p align="center"><img src="docs/assets/rehearse-demo.gif" width="720" alt="Rehearse starting its local control plane and dashboard, then the test suite passing."></p>
+
+No image or demo URL exists in the repo today.
+-->
+
+**Status:** every stage (backup source, sandbox, probes, run journal, evidence report) is built and tested on its own. The single command that runs them end to end is the next step. See [Current limitations](#current-limitations).
+
+## Run it
+
+You need Go 1.26.8 and Node.js 22 or newer.
+
+```bash
+git clone https://github.com/azizu06/rehearse.git && cd rehearse
+npm --prefix web ci          # install the dashboard's dependencies
+make build                   # build the dashboard and the Go binary
+./build/rehearse             # open http://127.0.0.1:8484
+make test                    # run the Go and web test suites
+```
+
+The rest of this README covers what works today, how to check each piece with real restic and Docker, and what is not finished yet.
+
+## Overview
+
 Rehearse is a local recovery-rehearsal tool for Docker Compose applications. Its
 current MVP slice provides the safety-critical building blocks for a recovery
 drill: a localhost control plane, a durable SQLite run journal, a read-only
