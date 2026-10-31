@@ -15,11 +15,9 @@ docs/assets/rehearse-demo.gif, then replace this comment with:
 No image or demo URL exists in the repo today.
 -->
 
-**Status:** every stage (backup source, sandbox, probes, run journal, evidence report) is built and tested on its own. The single command that runs them end to end is the next step. See [Current limitations](#current-limitations).
-
 ## Run it
 
-You need Go 1.26.8 and Node.js 22 or newer.
+You need Go 1.26.10 and Node.js 22 or newer.
 
 ```bash
 git clone https://github.com/azizu06/rehearse.git && cd rehearse
@@ -29,7 +27,7 @@ make build                   # build the dashboard and the Go binary
 make test                    # run the Go and web test suites
 ```
 
-The rest of this README covers what works today, how to check each piece with real restic and Docker, and what is not finished yet.
+The rest of this README covers how Rehearse works and how to verify each stage with real restic and Docker.
 
 ## Overview
 
@@ -70,7 +68,7 @@ command yet.
 | Typed HTTP, TCP, command, SQL, and data probes | [`docs/probes-and-evidence.md`](docs/probes-and-evidence.md); [`internal/probe`](internal/probe) tests | Available as probe boundary |
 | Canonical, redacted recovery evidence reports | [`internal/evidence/report_test.go`](internal/evidence/report_test.go) and [`internal/journal/report_store_test.go`](internal/journal/report_store_test.go) | Available as evidence boundary |
 | Prometheus `/metrics` fed by committed journal run changes, plus an optional Grafana dashboard | [`docs/observability.md`](docs/observability.md); [`internal/metrics`](internal/metrics) tests | Available as metrics boundary; drill series stay at zero until a workflow runs drills |
-| One command that restores, boots, probes, reports, and cleans up an application | — | Planned integration |
+| One command that restores, boots, probes, reports, and cleans up an application | — | Roadmap |
 
 ## A short demo path
 
@@ -114,7 +112,7 @@ sequenceDiagram
 
 ## Verify the shipped boundaries
 
-Prerequisites: Go **1.26.8** (the version in [`go.mod`](go.mod)), Node.js 22 or
+Prerequisites: Go **1.26.10** (the version in [`go.mod`](go.mod)), Node.js 22 or
 newer, and npm. Docker is required only for the integration commands below.
 
 ```bash
@@ -161,7 +159,9 @@ The design decisions and exact contracts are documented in
 [`docs/probes-and-evidence.md`](docs/probes-and-evidence.md), and
 [`docs/observability.md`](docs/observability.md).
 
-## Current limitations
+## Roadmap
+
+Next on the roadmap:
 
 - Rehearse does not yet ship a complete end-to-end recovery workflow that joins
   source acquisition, restore targeting, sandbox boot, probes, reporting, and
