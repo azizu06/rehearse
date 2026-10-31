@@ -2,6 +2,35 @@
 
 **Prove a backup can become a working application before an incident does.**
 
+Rehearse is a Go tool that tests disaster recovery: it pulls a real backup, boots the app in an isolated Docker sandbox, checks that it works, and saves a report as proof.
+
+<!--
+TODO(Aziz): record a demo and put it here. Suggested: a 20-30 second GIF of
+`./build/rehearse` starting, the dashboard at http://127.0.0.1:8484 loading,
+and `make test` passing in a second terminal. Save it as
+docs/assets/rehearse-demo.gif, then replace this comment with:
+
+<p align="center"><img src="docs/assets/rehearse-demo.gif" width="720" alt="Rehearse starting its local control plane and dashboard, then the test suite passing."></p>
+
+No image or demo URL exists in the repo today.
+-->
+
+## Run it
+
+You need Go 1.26.10 and Node.js 22 or newer.
+
+```bash
+git clone https://github.com/azizu06/rehearse.git && cd rehearse
+npm --prefix web ci          # install the dashboard's dependencies
+make build                   # build the dashboard and the Go binary
+make test                    # run the Go and web test suites
+./build/rehearse             # starts the server; open http://127.0.0.1:8484
+```
+
+The rest of this README covers how Rehearse works and how to verify each stage with real restic and Docker.
+
+## Overview
+
 Rehearse is a local recovery-rehearsal tool for Docker Compose applications. Its
 current MVP slice provides the safety-critical building blocks for a recovery
 drill: a localhost control plane, a durable SQLite run journal, a read-only
@@ -39,7 +68,7 @@ command yet.
 | Typed HTTP, TCP, command, SQL, and data probes | [`docs/probes-and-evidence.md`](docs/probes-and-evidence.md); [`internal/probe`](internal/probe) tests | Available as probe boundary |
 | Canonical, redacted recovery evidence reports | [`internal/evidence/report_test.go`](internal/evidence/report_test.go) and [`internal/journal/report_store_test.go`](internal/journal/report_store_test.go) | Available as evidence boundary |
 | Prometheus `/metrics` fed by committed journal run changes, plus an optional Grafana dashboard | [`docs/observability.md`](docs/observability.md); [`internal/metrics`](internal/metrics) tests | Available as metrics boundary; drill series stay at zero until a workflow runs drills |
-| One command that restores, boots, probes, reports, and cleans up an application | — | Planned integration |
+| One command that restores, boots, probes, reports, and cleans up an application | — | Roadmap |
 
 ## A short demo path
 
@@ -83,7 +112,7 @@ sequenceDiagram
 
 ## Verify the shipped boundaries
 
-Prerequisites: Go **1.26.8** (the version in [`go.mod`](go.mod)), Node.js 22 or
+Prerequisites: Go **1.26.10** (the version in [`go.mod`](go.mod)), Node.js 22 or
 newer, and npm. Docker is required only for the integration commands below.
 
 ```bash
@@ -130,7 +159,9 @@ The design decisions and exact contracts are documented in
 [`docs/probes-and-evidence.md`](docs/probes-and-evidence.md), and
 [`docs/observability.md`](docs/observability.md).
 
-## Current limitations
+## Roadmap
+
+Next on the roadmap:
 
 - Rehearse does not yet ship a complete end-to-end recovery workflow that joins
   source acquisition, restore targeting, sandbox boot, probes, reporting, and
