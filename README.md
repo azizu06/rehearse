@@ -85,7 +85,7 @@ curl http://127.0.0.1:8484/api/v1/health
 curl http://127.0.0.1:8484/api/v1/version
 ```
 
-The following sequence shows the tested recovery path across the components.
+The following sequence shows how a recovery drill moves across the components.
 
 ```mermaid
 sequenceDiagram
