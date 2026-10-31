@@ -4,16 +4,9 @@
 
 Rehearse is a Go tool that tests disaster recovery: it pulls a real backup, boots the app in an isolated Docker sandbox, checks that it works, and saves a report as proof.
 
-<!--
-TODO(Aziz): record a demo and put it here. Suggested: a 20-30 second GIF of
-`./build/rehearse` starting, the dashboard at http://127.0.0.1:8484 loading,
-and `make test` passing in a second terminal. Save it as
-docs/assets/rehearse-demo.gif, then replace this comment with:
+<p align="center"><img src="docs/assets/dashboard.png" width="720" alt="The Rehearse dashboard running locally at 127.0.0.1:8484, connected to the control plane."></p>
 
-<p align="center"><img src="docs/assets/rehearse-demo.gif" width="720" alt="Rehearse starting its local control plane and dashboard, then the test suite passing."></p>
-
-No image or demo URL exists in the repo today.
--->
+<p align="center"><img src="docs/assets/demo.gif" width="720" alt="Terminal querying the running Rehearse server: health returns ok, version returns dev, and the dashboard serves HTML."></p>
 
 ## Run it
 
