@@ -1,6 +1,6 @@
 # Rehearse agent instructions
 
-Read `CONTEXT.md`, `PRD.md`, and the relevant ADRs before changing product behavior. Read `HANDOFF.md` at the start of a fresh implementation task.
+Read `CONTEXT.md`, `PRD.md`, and the relevant ADRs before changing product behavior. Read `docs/HANDOFF.md` at the start of a fresh implementation task.
 
 ## Delivery workflow
 
