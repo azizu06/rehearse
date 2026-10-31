@@ -31,15 +31,13 @@ The rest of this README covers how Rehearse works and how to verify each stage w
 
 ## Overview
 
-Rehearse is a local recovery-rehearsal tool for Docker Compose applications. Its
-current MVP slice provides the safety-critical building blocks for a recovery
-drill: a localhost control plane, a durable SQLite run journal, a read-only
-restic source adapter, a bounded Docker Compose sandbox, typed probes, and
-redacted evidence reports. These components are covered by repository tests;
-the command that composes them into one end-to-end application recovery drill is
-the next integration step.
+Rehearse is a local recovery-rehearsal tool for Docker Compose applications. It
+is built from the safety-critical pieces a recovery drill needs: a localhost
+control plane, a durable SQLite run journal, a read-only restic source adapter,
+a bounded Docker Compose sandbox, typed probes, and redacted evidence reports.
+Every one of these components is covered by repository tests.
 
-## What the current MVP demonstrates
+## How it works
 
 The shipped runtime and libraries keep recovery work local and make its outcome
 inspectable. Start the native binary to see the control plane and dashboard; run
@@ -55,9 +53,7 @@ flowchart LR
     Probes --> Evidence
 ```
 
-The diagram is an architecture map of the components currently in the repository,
-not a claim that the control plane wires every recovery component into one user
-command yet.
+The diagram maps how the components fit together.
 
 | Capability | Current evidence | Status |
 | --- | --- | --- |
@@ -89,9 +85,7 @@ curl http://127.0.0.1:8484/api/v1/health
 curl http://127.0.0.1:8484/api/v1/version
 ```
 
-The following sequence describes the tested recovery path at the component
-boundaries. The orchestration arrows are deliberately dashed: they are not yet
-exposed as a complete user-facing drill command.
+The following sequence shows the tested recovery path across the components.
 
 ```mermaid
 sequenceDiagram
@@ -163,13 +157,11 @@ The design decisions and exact contracts are documented in
 
 Next on the roadmap:
 
-- Rehearse does not yet ship a complete end-to-end recovery workflow that joins
-  source acquisition, restore targeting, sandbox boot, probes, reporting, and
-  cleanup behind one CLI or dashboard action.
-- The current restic adapter and Compose sandbox are tested boundaries, not a
-  promise of every backup source, restore target, or application topology.
-- The dashboard currently proves the local control-plane connection; it is not a
-  run-management interface.
+- A single CLI and dashboard action that runs the whole drill: source
+  acquisition, restore targeting, sandbox boot, probes, reporting, and cleanup.
+- More backup sources, restore targets, and application topologies beyond restic
+  and Docker Compose.
+- Run management in the dashboard.
 
 ## License
 
