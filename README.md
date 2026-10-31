@@ -23,8 +23,8 @@ You need Go 1.26.10 and Node.js 22 or newer.
 git clone https://github.com/azizu06/rehearse.git && cd rehearse
 npm --prefix web ci          # install the dashboard's dependencies
 make build                   # build the dashboard and the Go binary
-./build/rehearse             # open http://127.0.0.1:8484
 make test                    # run the Go and web test suites
+./build/rehearse             # starts the server; open http://127.0.0.1:8484
 ```
 
 The rest of this README covers how Rehearse works and how to verify each stage with real restic and Docker.
