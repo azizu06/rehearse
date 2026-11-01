@@ -80,6 +80,30 @@ func TestReportRejectsInvalidIdentity(t *testing.T) {
 	}
 }
 
+func TestReportRejectsInvalidEnumValues(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name   string
+		mutate func(*evidence.Report)
+	}{
+		{name: "invalid outcome", mutate: func(report *evidence.Report) { report.Outcome = drill.Outcome("unknown") }},
+		{name: "invalid stage name", mutate: func(report *evidence.Report) { report.Stages[0].Name = drill.Stage("unknown") }},
+		{name: "invalid probe kind", mutate: func(report *evidence.Report) { report.Probes[0].Kind = probe.Kind("unknown") }},
+		{name: "invalid probe status", mutate: func(report *evidence.Report) { report.Probes[0].Status = probe.Status("unknown") }},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			report := validReport()
+			test.mutate(&report)
+			if err := report.Validate(); !errors.Is(err, evidence.ErrInvalidReport) {
+				t.Fatalf("Validate() error = %v, want ErrInvalidReport", err)
+			}
+		})
+	}
+}
+
 func TestCanonicalReportPreservesContiguousSemanticOrder(t *testing.T) {
 	t.Parallel()
 
