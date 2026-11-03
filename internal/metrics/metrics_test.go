@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"path/filepath"
 	"reflect"
 	"slices"
@@ -281,6 +283,31 @@ func TestJournalCommitsDriveRecorderAcrossRestart(t *testing.T) {
 	}
 	if got := snapshot(gather(t, recorder)); !reflect.DeepEqual(got, want) {
 		t.Fatalf("metrics = %v, want %v", got, want)
+	}
+}
+
+func TestHandlerServesPrometheusExposition(t *testing.T) {
+	t.Parallel()
+
+	recorder := metrics.New()
+	run, created, err := drill.NewRun("run-1", "plan-1", 1, time.Now())
+	if err != nil {
+		t.Fatalf("NewRun: %v", err)
+	}
+	recorder.ObserveRunChange(drill.Run{}, run, created)
+
+	request := httptest.NewRequest(http.MethodGet, "/metrics", nil)
+	response := httptest.NewRecorder()
+	recorder.Handler().ServeHTTP(response, request)
+
+	if response.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d", response.Code, http.StatusOK)
+	}
+	body := response.Body.String()
+	for _, want := range []string{"rehearse_drill_runs_total", "rehearse_drill_stage_duration_seconds"} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("response body missing %q:\n%s", want, body)
+		}
 	}
 }
 
