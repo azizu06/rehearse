@@ -72,6 +72,60 @@ func TestRequestValidationRejectsInvalidBounds(t *testing.T) {
 	}
 }
 
+func TestGenerateOwnershipIDsProduceDistinctValidHexIdentifiers(t *testing.T) {
+	generators := map[string]func() (string, error){
+		"claim ID":               generateClaimID,
+		"resource generation ID": generateResourceGenerationID,
+	}
+	for name, generate := range generators {
+		t.Run(name, func(t *testing.T) {
+			first, err := generate()
+			if err != nil {
+				t.Fatalf("generate %s: %v", name, err)
+			}
+			if !validOwnershipID(first) {
+				t.Fatalf("generate %s = %q, want 64 lowercase hexadecimal characters", name, first)
+			}
+			second, err := generate()
+			if err != nil {
+				t.Fatalf("generate %s: %v", name, err)
+			}
+			if first == second {
+				t.Fatalf("generate %s returned the same value twice: %q", name, first)
+			}
+		})
+	}
+}
+
+func TestResourceLabelsRejectsMalformedGenerationID(t *testing.T) {
+	identity, err := newIdentity("run-generation")
+	if err != nil {
+		t.Fatalf("newIdentity: %v", err)
+	}
+	for _, invalid := range []string{"", "abc", strings.Repeat("A", 64), strings.Repeat("g", 64)} {
+		if _, err := resourceLabels(identity, invalid); !errors.Is(err, ErrInvalidRequest) {
+			t.Fatalf("resourceLabels(%q) error = %v, want ErrInvalidRequest", invalid, err)
+		}
+	}
+}
+
+func TestResourceLabelsAppliesGenerationLabelToIdentityLabels(t *testing.T) {
+	identity, err := newIdentity("run-generation")
+	if err != nil {
+		t.Fatalf("newIdentity: %v", err)
+	}
+	labels, err := resourceLabels(identity, testClaimID)
+	if err != nil {
+		t.Fatalf("resourceLabels: %v", err)
+	}
+	if got := labels[resourceGenerationLabel]; got != testClaimID {
+		t.Fatalf("resource generation label = %q, want %q", got, testClaimID)
+	}
+	if got := labels[runFingerprintLabel]; got != identity.fingerprint {
+		t.Fatalf("fingerprint label = %q, want %q", got, identity.fingerprint)
+	}
+}
+
 func TestRequestValidationAcceptsMinimumCPUQuota(t *testing.T) {
 	request := Request{
 		RunID:        "run-minimum-cpu",
