@@ -59,6 +59,18 @@ func TestCanonicalJournalPathRejectsMissingParentDirectory(t *testing.T) {
 	}
 }
 
+func TestCanonicalJournalPathRejectsSymlinkLoop(t *testing.T) {
+	dir := t.TempDir()
+	looped := filepath.Join(dir, "rehearse.db")
+	if err := os.Symlink("rehearse.db", looped); err != nil {
+		t.Fatalf("create self-referential symlink: %v", err)
+	}
+
+	if _, err := canonicalJournalPath(looped); err == nil {
+		t.Fatalf("canonicalJournalPath(%q) error = nil, want symlink resolution failure", looped)
+	}
+}
+
 func TestRejectHardLinkedJournalRequiresExistingPath(t *testing.T) {
 	dir := t.TempDir()
 	missing := filepath.Join(dir, "missing.db")
