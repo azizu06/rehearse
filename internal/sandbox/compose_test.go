@@ -170,3 +170,65 @@ func TestComposeSafetyAcceptsProjectScopedSingleReplicaModel(t *testing.T) {
 		t.Fatalf("compose args = %q, want empty environment file", args)
 	}
 }
+
+func TestRawFloatEqualRejectsUnparsableData(t *testing.T) {
+	tests := []struct {
+		name     string
+		data     string
+		expected string
+		want     bool
+	}{
+		{name: "matching values", data: `"0.5"`, expected: "0.5", want: true},
+		{name: "unparsable data", data: `"not-a-number"`, expected: "0.5", want: false},
+		{name: "mismatched values", data: `"0.5"`, expected: "1", want: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := rawFloatEqual(json.RawMessage(tt.data), tt.expected); got != tt.want {
+				t.Fatalf("rawFloatEqual(%q, %q) = %v, want %v", tt.data, tt.expected, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestStringMapEqualRejectsLengthMismatch(t *testing.T) {
+	tests := []struct {
+		name     string
+		actual   map[string]string
+		expected map[string]string
+		want     bool
+	}{
+		{name: "equal maps", actual: map[string]string{"a": "1"}, expected: map[string]string{"a": "1"}, want: true},
+		{name: "actual has extra key", actual: map[string]string{"a": "1", "b": "2"}, expected: map[string]string{"a": "1"}, want: false},
+		{name: "same length different value", actual: map[string]string{"a": "1"}, expected: map[string]string{"a": "2"}, want: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := stringMapEqual(tt.actual, tt.expected); got != tt.want {
+				t.Fatalf("stringMapEqual(%v, %v) = %v, want %v", tt.actual, tt.expected, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestDeployLimitsEqualRejectsMalformedShapes(t *testing.T) {
+	limits := Limits{CPUs: "0.5", MemoryBytes: 32 << 20, PIDs: 16}
+	matching := `{"limits":{"cpus":"0.5","memory":"33554432","pids":"16"}}`
+	tests := []struct {
+		name string
+		data string
+		want bool
+	}{
+		{name: "matching limits", data: matching, want: true},
+		{name: "not an object", data: `["limits"]`, want: false},
+		{name: "extra top-level key", data: `{"limits":{"cpus":"0.5","memory":"33554432","pids":"16"},"reservations":{}}`, want: false},
+		{name: "missing limits field", data: `{"cpus":"0.5"}`, want: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := deployLimitsEqual(json.RawMessage(tt.data), limits); got != tt.want {
+				t.Fatalf("deployLimitsEqual(%q, %+v) = %v, want %v", tt.data, limits, got, tt.want)
+			}
+		})
+	}
+}
