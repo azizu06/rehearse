@@ -67,6 +67,51 @@ func TestCanonicalConfigRejectsOversizedProgrammaticDocument(t *testing.T) {
 	}
 }
 
+func TestCanonicalJSONOrdersProbesByOrdinalNotDeclarationOrder(t *testing.T) {
+	t.Parallel()
+
+	config := probe.Config{
+		SchemaVersion: probe.SchemaVersion,
+		Probes: []probe.Spec{
+			{
+				Ordinal: 2, ID: "second", Kind: probe.KindHTTP, Required: true,
+				Retry: probe.RetryPolicy{Deadline: time.Second, Backoff: 10 * time.Millisecond, MaxAttempts: 1},
+				HTTP:  &probe.HTTPSpec{URL: "https://example.com/second", ExpectedStatus: 200},
+			},
+			{
+				Ordinal: 1, ID: "first", Kind: probe.KindHTTP, Required: true,
+				Retry: probe.RetryPolicy{Deadline: time.Second, Backoff: 10 * time.Millisecond, MaxAttempts: 1},
+				HTTP:  &probe.HTTPSpec{URL: "https://example.com/first", ExpectedStatus: 200},
+			},
+		},
+	}
+
+	encoded, err := config.CanonicalJSON()
+	if err != nil {
+		t.Fatalf("CanonicalJSON() error = %v, want nil", err)
+	}
+
+	roundTripped, err := probe.ParseConfigBytes(encoded)
+	if err != nil {
+		t.Fatalf("ParseConfigBytes(encoded) error = %v, want nil", err)
+	}
+	if len(roundTripped.Probes) != 2 {
+		t.Fatalf("len(Probes) = %d, want 2", len(roundTripped.Probes))
+	}
+	if got := roundTripped.Probes[0].ID; got != "first" {
+		t.Fatalf("Probes[0].ID = %q, want %q (sorted by ordinal)", got, "first")
+	}
+	if got := roundTripped.Probes[1].ID; got != "second" {
+		t.Fatalf("Probes[1].ID = %q, want %q (sorted by ordinal)", got, "second")
+	}
+
+	firstIndex := strings.Index(string(encoded), `"id":"first"`)
+	secondIndex := strings.Index(string(encoded), `"id":"second"`)
+	if firstIndex == -1 || secondIndex == -1 || firstIndex > secondIndex {
+		t.Fatalf("encoded bytes = %s, want %q to appear before %q", encoded, "first", "second")
+	}
+}
+
 func TestConfigIsZero(t *testing.T) {
 	t.Parallel()
 
