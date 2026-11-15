@@ -61,6 +61,36 @@ func TestPlanRejectsInvalidCredentialReferences(t *testing.T) {
 	}
 }
 
+func TestCredentialReferenceValidate(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		ref     drill.CredentialReference
+		wantErr bool
+	}{
+		{name: "valid environment", ref: drill.CredentialReference{Provider: drill.CredentialEnvironment, Locator: "REHEARSE_PASSWORD"}},
+		{name: "valid file", ref: drill.CredentialReference{Provider: drill.CredentialFile, Locator: "/run/secrets/rehearse-password"}},
+		{name: "valid keychain", ref: drill.CredentialReference{Provider: drill.CredentialKeychain, Locator: "rehearse/backup-password"}},
+		{name: "unsupported provider", ref: drill.CredentialReference{Provider: "inline", Locator: "secret"}, wantErr: true},
+		{name: "invalid environment locator", ref: drill.CredentialReference{Provider: drill.CredentialEnvironment, Locator: "actual password"}, wantErr: true},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+
+			err := test.ref.Validate()
+			if test.wantErr && err == nil {
+				t.Fatalf("Validate() = nil, want error")
+			}
+			if !test.wantErr && err != nil {
+				t.Fatalf("Validate() = %v, want nil", err)
+			}
+		})
+	}
+}
+
 func TestPlanRejectsInvalidPersistedFields(t *testing.T) {
 	t.Parallel()
 
