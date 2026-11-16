@@ -185,6 +185,36 @@ func TestParseJSONAcceptsMaximumBoundedProbeEvidence(t *testing.T) {
 	}
 }
 
+func TestParseJSONRejectsMalformedInput(t *testing.T) {
+	t.Parallel()
+
+	validEncoded, err := validReport().CanonicalJSON(redact.Redactor{})
+	if err != nil {
+		t.Fatalf("CanonicalJSON: %v", err)
+	}
+
+	const maxReportBytes = 20 << 20
+	paddedValidDocument := append(bytes.Repeat([]byte(" "), maxReportBytes+1-len(validEncoded)), validEncoded...)
+
+	tests := []struct {
+		name     string
+		contents []byte
+	}{
+		{name: "empty", contents: nil},
+		{name: "oversized but otherwise well-formed", contents: paddedValidDocument},
+		{name: "malformed JSON", contents: []byte("{not valid json")},
+		{name: "trailing JSON after a valid document", contents: append(append([]byte{}, validEncoded...), []byte("{}")...)},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			if _, err := evidence.ParseJSON(test.contents); !errors.Is(err, evidence.ErrInvalidReport) {
+				t.Fatalf("ParseJSON() error = %v, want ErrInvalidReport", err)
+			}
+		})
+	}
+}
+
 func TestReportViewCanonicalJSON(t *testing.T) {
 	t.Parallel()
 
