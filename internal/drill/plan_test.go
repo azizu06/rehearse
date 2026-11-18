@@ -110,6 +110,57 @@ func TestPlanRejectsInvalidProbeConfig(t *testing.T) {
 	}
 }
 
+func TestCredentialReferenceValidate(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		ref     drill.CredentialReference
+		wantErr string
+	}{
+		{name: "valid environment", ref: drill.CredentialReference{Provider: drill.CredentialEnvironment, Locator: "REHEARSE_PASSWORD"}},
+		{name: "valid file", ref: drill.CredentialReference{Provider: drill.CredentialFile, Locator: "/run/secrets/rehearse-password"}},
+		{name: "valid keychain", ref: drill.CredentialReference{Provider: drill.CredentialKeychain, Locator: "rehearse/backup-password"}},
+		{
+			name:    "invalid environment locator",
+			ref:     drill.CredentialReference{Provider: drill.CredentialEnvironment, Locator: "actual password"},
+			wantErr: "environment locator must be a variable name",
+		},
+		{
+			name:    "relative file locator",
+			ref:     drill.CredentialReference{Provider: drill.CredentialFile, Locator: "secrets/password"},
+			wantErr: "file locator must be a clean absolute path",
+		},
+		{
+			name:    "invalid keychain locator",
+			ref:     drill.CredentialReference{Provider: drill.CredentialKeychain, Locator: "password"},
+			wantErr: "keychain locator must be service/account",
+		},
+		{
+			name:    "unsupported provider",
+			ref:     drill.CredentialReference{Provider: "inline", Locator: "secret"},
+			wantErr: "unsupported credential provider",
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+
+			err := test.ref.Validate()
+			if test.wantErr == "" {
+				if err != nil {
+					t.Fatalf("Validate() = %v, want nil", err)
+				}
+				return
+			}
+			if err == nil || err.Error() != test.wantErr {
+				t.Fatalf("Validate() = %v, want error %q", err, test.wantErr)
+			}
+		})
+	}
+}
+
 func validPlan() drill.Plan {
 	return drill.Plan{
 		ID:        "plan-1",
