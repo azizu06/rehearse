@@ -84,6 +84,19 @@ func TestBoundedStringTrimsPartialMarkerAtTruncationBoundary(t *testing.T) {
 	}
 }
 
+func TestBoundedStringKeepsCompleteMarkerWhenTruncationBoundaryFollowsIt(t *testing.T) {
+	t.Parallel()
+
+	want := "aaa" + redact.Replacement
+	got, truncated := redact.New("X").BoundedString("aaaXbbb", len(want))
+	if got != want {
+		t.Fatalf("BoundedString() = %q, want %q", got, want)
+	}
+	if !truncated {
+		t.Fatal("BoundedString() truncated = false, want true")
+	}
+}
+
 func TestRedactionIsIdempotentWhenMarkersOverlapReplacement(t *testing.T) {
 	t.Parallel()
 
