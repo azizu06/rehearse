@@ -72,6 +72,32 @@ func TestVersionedAPI(t *testing.T) {
 	}
 }
 
+func TestNewHandlerAppliesDefaultsWhenOptionsAreEmpty(t *testing.T) {
+	t.Parallel()
+
+	handler := controlplane.NewHandler(controlplane.Options{})
+
+	versionRequest := httptest.NewRequest(http.MethodGet, "/api/v1/version", nil)
+	versionResponse := httptest.NewRecorder()
+	handler.ServeHTTP(versionResponse, versionRequest)
+
+	var versionBody map[string]string
+	if err := json.NewDecoder(versionResponse.Body).Decode(&versionBody); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if versionBody["version"] != "dev" {
+		t.Fatalf("version = %q, want %q", versionBody["version"], "dev")
+	}
+
+	dashboardRequest := httptest.NewRequest(http.MethodGet, "/", nil)
+	dashboardResponse := httptest.NewRecorder()
+	handler.ServeHTTP(dashboardResponse, dashboardRequest)
+
+	if dashboardResponse.Code != http.StatusNotFound {
+		t.Fatalf("default dashboard status = %d, want %d", dashboardResponse.Code, http.StatusNotFound)
+	}
+}
+
 func TestReportAPIReappliesRedaction(t *testing.T) {
 	t.Parallel()
 
