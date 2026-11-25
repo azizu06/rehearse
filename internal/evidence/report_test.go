@@ -185,6 +185,41 @@ func TestParseJSONAcceptsMaximumBoundedProbeEvidence(t *testing.T) {
 	}
 }
 
+func TestParseJSONRejectsMalformedInput(t *testing.T) {
+	t.Parallel()
+
+	validEncoded, err := validReport().CanonicalJSON(redact.Redactor{})
+	if err != nil {
+		t.Fatalf("CanonicalJSON: %v", err)
+	}
+	invalidReport := validReport()
+	invalidReport.SchemaVersion = "wrong"
+	invalidEncoded, err := json.Marshal(invalidReport)
+	if err != nil {
+		t.Fatalf("json.Marshal: %v", err)
+	}
+
+	tests := []struct {
+		name     string
+		contents []byte
+	}{
+		{name: "empty input", contents: nil},
+		{name: "oversized input", contents: bytes.Repeat([]byte("0"), 20<<20+1)},
+		{name: "malformed JSON", contents: []byte("{not-json")},
+		{name: "unknown field", contents: []byte(`{"schema_version":"x","unexpected_field":true}`)},
+		{name: "trailing JSON", contents: append(append([]byte{}, validEncoded...), []byte(`{}`)...)},
+		{name: "structurally valid but fails schema validation", contents: invalidEncoded},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			if _, err := evidence.ParseJSON(test.contents); !errors.Is(err, evidence.ErrInvalidReport) {
+				t.Fatalf("ParseJSON() error = %v, want ErrInvalidReport", err)
+			}
+		})
+	}
+}
+
 func TestReportViewCanonicalJSON(t *testing.T) {
 	t.Parallel()
 
