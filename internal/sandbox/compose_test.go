@@ -171,6 +171,122 @@ func TestComposeSafetyAcceptsProjectScopedSingleReplicaModel(t *testing.T) {
 	}
 }
 
+func TestValidateEnforcedServiceRejectsPolicyDrift(t *testing.T) {
+	identity, _ := newIdentity("run-enforced")
+	limits := Limits{CPUs: "0.5", MemoryBytes: 32 << 20, PIDs: 16, OutputBytes: 4096}
+	validService := func() composeService {
+		return composeService{
+			Labels:    identity.labels(),
+			CPUs:      json.RawMessage(`"0.5"`),
+			MemLimit:  json.RawMessage(`"33554432"`),
+			PidsLimit: json.RawMessage(`"16"`),
+			Deploy:    &composeDeploy{Resources: json.RawMessage(`{"limits":{"cpus":"0.5","memory":"33554432","pids":"16"}}`)},
+			Logging: &composeLogging{Driver: "local", Options: map[string]string{
+				"compress": "false", "max-file": "1", "max-size": "4096",
+			}},
+			PullPolicy: "never",
+			Restart:    "no",
+		}
+	}
+	tests := []struct {
+		name    string
+		mutate  func(composeService) composeService
+		wantErr bool
+	}{
+		{name: "matches enforced policy", mutate: func(s composeService) composeService { return s }},
+		{name: "ownership labels do not match", mutate: func(s composeService) composeService {
+			s.Labels = map[string]string{"other": "label"}
+			return s
+		}, wantErr: true},
+		{name: "CPU limit changed", mutate: func(s composeService) composeService {
+			s.CPUs = json.RawMessage(`"1"`)
+			return s
+		}, wantErr: true},
+		{name: "memory limit changed", mutate: func(s composeService) composeService {
+			s.MemLimit = json.RawMessage(`"1"`)
+			return s
+		}, wantErr: true},
+		{name: "PID limit changed", mutate: func(s composeService) composeService {
+			s.PidsLimit = json.RawMessage(`"1"`)
+			return s
+		}, wantErr: true},
+		{name: "deploy block removed", mutate: func(s composeService) composeService {
+			s.Deploy = nil
+			return s
+		}, wantErr: true},
+		{name: "deploy limits changed", mutate: func(s composeService) composeService {
+			s.Deploy = &composeDeploy{Resources: json.RawMessage(`{"limits":{"cpus":"1","memory":"33554432","pids":"16"}}`)}
+			return s
+		}, wantErr: true},
+		{name: "logging block removed", mutate: func(s composeService) composeService {
+			s.Logging = nil
+			return s
+		}, wantErr: true},
+		{name: "logging driver changed", mutate: func(s composeService) composeService {
+			s.Logging = &composeLogging{Driver: "json-file", Options: s.Logging.Options}
+			return s
+		}, wantErr: true},
+		{name: "logging options changed", mutate: func(s composeService) composeService {
+			s.Logging = &composeLogging{Driver: "local", Options: map[string]string{"max-size": "4096"}}
+			return s
+		}, wantErr: true},
+		{name: "pull policy changed", mutate: func(s composeService) composeService {
+			s.PullPolicy = "always"
+			return s
+		}, wantErr: true},
+		{name: "restart policy changed", mutate: func(s composeService) composeService {
+			s.Restart = "unless-stopped"
+			return s
+		}, wantErr: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := validateEnforcedService("worker", tt.mutate(validService()), identity, limits)
+			if tt.wantErr && !errors.Is(err, ErrUnsafeCompose) {
+				t.Fatalf("validateEnforcedService error = %v, want ErrUnsafeCompose", err)
+			}
+			if !tt.wantErr && err != nil {
+				t.Fatalf("validateEnforcedService error = %v, want nil", err)
+			}
+		})
+	}
+}
+
+func TestValidateEnforcedResourcesRejectsPolicyDrift(t *testing.T) {
+	identity, _ := newIdentity("run-enforced-resources")
+	labels := identity.labels()
+	tests := []struct {
+		name    string
+		model   composeModel
+		wantErr bool
+	}{
+		{name: "matches enforced policy", model: composeModel{
+			Networks: map[string]composeResource{"default": {Internal: true, Labels: labels}},
+			Volumes:  map[string]composeResource{"data": {Labels: labels}},
+		}},
+		{name: "network not internal", model: composeModel{
+			Networks: map[string]composeResource{"default": {Internal: false, Labels: labels}},
+		}, wantErr: true},
+		{name: "network ownership labels missing", model: composeModel{
+			Networks: map[string]composeResource{"default": {Internal: true, Labels: map[string]string{"other": "label"}}},
+		}, wantErr: true},
+		{name: "volume ownership labels missing", model: composeModel{
+			Volumes: map[string]composeResource{"data": {Labels: map[string]string{"other": "label"}}},
+		}, wantErr: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := validateEnforcedResources(tt.model, identity)
+			if tt.wantErr && !errors.Is(err, ErrUnsafeCompose) {
+				t.Fatalf("validateEnforcedResources error = %v, want ErrUnsafeCompose", err)
+			}
+			if !tt.wantErr && err != nil {
+				t.Fatalf("validateEnforcedResources error = %v, want nil", err)
+			}
+		})
+	}
+}
+
 func TestRawFloatEqualRejectsUnparsableData(t *testing.T) {
 	tests := []struct {
 		name     string
